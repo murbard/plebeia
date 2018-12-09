@@ -1,0 +1,12 @@
+(executables
+ (names test_context)
+ (libraries  context
+             alcotest))
+
+(alias
+ (name buildtest)
+ (deps test_context.exe))
+
+(alias
+ (name runtest_context)
+ (action (run %{exe:test_context.exe})))
