@@ -1,7 +1,7 @@
 
 let sha224 s =
   let ret = Bytes.create 28 in
-  let digest = Nocrypto.Hash.SHA256.digest (Cstruct.of_string (String.concat "" ["\000"; s])) in
+  let digest = Nocrypto.Hash.SHA256.digest (Cstruct.of_string s) in
   Cstruct.blit_to_bytes digest 0 ret 0 28 ; Bytes.to_string ret
 
 let node_hash ~left ~right =
@@ -86,6 +86,7 @@ end
 
 
 
+
 module Node : sig
 
 
@@ -97,7 +98,6 @@ end = struct
   type not_indexed (* a node that hasn't *)
   type hash = string
   type index = Stdint.uint32
-
 
   type ('ia, 'ha) indexed_implies_hashed =
     | Indexed_and_Hashed : (indexed, hashed) indexed_implies_hashed
@@ -133,6 +133,7 @@ end = struct
       -> ('ia, 'ha) view
 
 end
+
 
 
 (** A functional Merkle trie with persistence to disk. *)
@@ -234,7 +235,81 @@ end = struct
             (previous_index, child_index) in
         View { node = Internal (Disk left, Disk right); index = Some index; hash = Some (Bytes.sub cell 0 28) }
 
+
+
   let null_hash = Bytes.init 28 (fun _ -> '\000')
+
+  let rec hash_nodes = function
+    | Disk index ->
+      let n = load_node index in
+      hash_nodes n
+    | Null -> (Null, null_hash)
+    | View { _ ; _ ; Some hash } as n -> (hash, n)
+    | View { node ; Some index ; None } as n -> hash_nodes (load_node index) (* should not happen *)
+    | View { node ; None ; None } as n ->
+      begin
+        match node with
+        | Internal (left, right) ->
+          let (hl, left) = hash_nodes left and (hr, right) = hash_nodes right
+          in let hash = node_hash hl hr in
+          (hash, View {node = Internal (hl, hr); index = None ; Some hash_nodes}
+        | Bud (segment, root) ->
+         (Null, null_hash)
+          | Leaf _ -> (Null, null_hash)
+      end
+
+
+
+
+
+  let write_internal forest ileft iright h =
+    let b = Bytes.create 32 in
+    Bytes.blit b 0 h 0 24;
+    Stdint.Uint32.to_bytes_little_endian ileft b 24;
+    Stdint.Uint32.to_bytes_little_endian iright b 24;
+    let index = forest.length in
+    let offset = 32 * (Stdint.Uint32.to_int index) in
+    for i = 0 to 31 do
+      Bigarray.Array1.set forest.array (offset+i) (Bytes.get b i)
+    done ;
+    forest.length <- Stdint.Uint32.(index+ one);
+    index
+
+  let write_leaf forest path value =
+    let h = KeyValueStore.insert forest.leaf_table value in
+    let index = forest.length in
+    failwith "not implemented"
+ (*
+    let offset = 32 * (Stdint.Uint32.to_int index) in
+    let b = Bytes.create 32 in
+    Bytes.blit b 0 path 0 24;
+    Stdint.Uint32.(to_bytes_little_endian (index + one) b 24);
+    Stdint.Uint32.(to_bytes_little_endian int_max b 24);
+    for i = 0 to 31 do
+      Bigarray.Array1.set forest.array (offset+i) (Bytes.get b i)
+
+    (h, Stdint.Uint32.zero) *)
+
+  let commit (forest, node) =
+    let rec commit_aux forest node depth =
+      match node with
+      | Null -> (null_hash, Stdint.Uint32.zero)
+      | Disk index -> (get_hash forest.array index, index)
+      | View (_, Some index) -> (get_hash forest.array index, index)
+      | View (view_node, None) -> begin
+          match view_node with
+          | Internal (left, right) ->
+            let (hleft, ileft)  = commit_aux forest left  (depth + 1)
+            and (hright, iright) = commit_aux forest right (depth + 1) in
+            let h = mixhash hleft hright
+            in (h, write_internal forest ileft iright h)
+          | Leaf (path, value) -> write_leaf forest path valeu
+        end
+    in
+    let (hash, index) = commit_aux forest node 0 in
+    Hashtbl.add forest.roots_table hash index
+
+
 
   let upsert (forest, node) path value =
     let rec upsert_aux forest path node depth value =
@@ -306,52 +381,6 @@ end = struct
         end
     in (forest, upsert_aux forest path node 0 value)
 
-  let write_internal forest ileft iright h =
-    let b = Bytes.create 32 in
-    Bytes.blit b 0 h 0 24;
-    Stdint.Uint32.to_bytes_little_endian ileft b 24;
-    Stdint.Uint32.to_bytes_little_endian iright b 24;
-    let index = forest.length in
-    let offset = 32 * (Stdint.Uint32.to_int index) in
-    for i = 0 to 31 do
-      Bigarray.Array1.set forest.array (offset+i) (Bytes.get b i)
-    done ;
-    forest.length <- Stdint.Uint32.(index+ one);
-    index
-
-  let write_leaf forest path value =
-    let h = KeyValueStore.insert forest.leaf_table value in
-    let index = forest.length in
-    failwith "not implemented"
- (*
-    let offset = 32 * (Stdint.Uint32.to_int index) in
-    let b = Bytes.create 32 in
-    Bytes.blit b 0 path 0 24;
-    Stdint.Uint32.(to_bytes_little_endian (index + one) b 24);
-    Stdint.Uint32.(to_bytes_little_endian int_max b 24);
-    for i = 0 to 31 do
-      Bigarray.Array1.set forest.array (offset+i) (Bytes.get b i)
-
-    (h, Stdint.Uint32.zero) *)
-
-  let commit (forest, node) =
-    let rec commit_aux forest node depth =
-      match node with
-      | Null -> (null_hash, Stdint.Uint32.zero)
-      | Disk index -> (get_hash forest.array index, index)
-      | View (_, Some index) -> (get_hash forest.array index, index)
-      | View (view_node, None) -> begin
-          match view_node with
-          | Internal (left, right) ->
-            let (hleft, ileft)  = commit_aux forest left  (depth + 1)
-            and (hright, iright) = commit_aux forest right (depth + 1) in
-            let h = mixhash hleft hright
-            in (h, write_internal forest ileft iright h)
-          | Leaf (path, value) -> write_leaf forest path valeu
-        end
-    in
-    let (hash, index) = commit_aux forest node 0 in
-    Hashtbl.add forest.roots_table hash index
 
 
 
