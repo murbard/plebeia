@@ -86,6 +86,55 @@ end
 
 
 
+module Node : sig
+
+
+end = struct
+
+  type hashed (* a node knows its internal hash *)
+  type not_hashed (* a node that doesn't *)
+  type indexed (* a node that has been indexed on disk *)
+  type not_indexed (* a node that hasn't *)
+  type hash = string
+  type index = Stdint.uint32
+
+
+  type ('ia, 'ha) indexed_implies_hashed =
+    | Indexed_and_Hashed : (indexed, hashed) indexed_implies_hashed
+    | Not_Indexed_Any : (not_indexed, 'ha) indexed_implies_hashed
+
+  type ('ha, 'hb, 'hc) hashed_is_transitive =
+    | Hashed : hash -> (hashed, hashed, hashed) hashed_is_transitive
+    | Not_Hashed : (not_hashed, 'hb, 'hc) hashed_is_transitive
+
+  type ('ia, 'ib, 'ic) indexed_is_transitive =
+    | Indexed : index -> (indexed, indexed, indexed) indexed_is_transitive
+    | Not_Indexed : (not_indexed, 'ib, 'ic) indexed_is_transitive
+
+  type ('ia, 'ha) node =
+    | Null : (indexed, hashed ) node
+    | Disk : index -> (indexed, hashed) node
+    | View : ('a, 'ha) view -> ('ia, 'ha) node
+  and ('ia, 'ha) view =
+      Internal : ('ib, 'hb) node * ('ic, 'hc) node
+                 * ('ia, 'ib, 'ic) indexed_is_transitive
+                 * ('ha, 'hb, 'hc) hashed_is_transitive
+                 * ('ia, 'ha) indexed_implies_hashed
+                 -> ('ia, 'ha) view
+    | Bud : Path.segment * ('ib, 'hb) node
+            * ('ia, 'ib, 'ib) indexed_is_transitive
+            * ('ha, 'hb, 'hb) hashed_is_transitive
+            * ('ia, 'ha) indexed_implies_hashed
+      -> ('ia, 'ha) view
+    | Leaf: Path.segment * Value.t
+            * ('ia, 'ia, 'ia) indexed_is_transitive
+            * ('ha, 'ha, 'ha) hashed_is_transitive
+            * ('ia, 'ha) indexed_implies_hashed
+      -> ('ia, 'ha) view
+
+end
+
+
 (** A functional Merkle trie with persistence to disk. *)
 module Forest : sig
 
