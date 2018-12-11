@@ -1,55 +1,75 @@
 
-let sha192 b:bytes =
-  let ret = Bytes.create 24 in
-  let digest = Nocrypto.Hash.SHA256.digest (Cstruct.of_bytes b) in
-  Cstruct.blit_to_bytes digest 0 ret 0 24 ; ret
+let sha224 s =
+  let ret = Bytes.create 28 in
+  let digest = Nocrypto.Hash.SHA256.digest (Cstruct.of_string (String.concat "" ["\000"; s])) in
+  Cstruct.blit_to_bytes digest 0 ret 0 28 ; Bytes.to_string ret
 
+let node_hash ~left ~right =
+  sha224 (String.concat "" ["\001"; left; right])
+
+(** Path of a value inside of a trie. *)
+module Path : sig
+  type segment
+  type path = segment list
+  type side = Left | Right
+  val segment_of_string : string -> segment
+  val get_bit: segment -> int -> side
+end = struct
+  type segment = string
+  type path = segment list
+  type side = Left | Right
+  let segment_of_string = sha224
+  let get_bit segment d =
+    if (int_of_char (Bytes.get segment (d / 8))) land (1 lsl (d mod 8)) = 1 then
+      Left
+    else
+      Right
+end
+
+(** Values inserted in the trie. *)
+module Value : sig
+  type t
+  type hash
+  val hash : t -> hash
+  val hash_of_bytes : bytes -> hash
+  val of_string : string -> t
+end = struct
+  type t = string
+  type hash = string
+  let of_string s = s
+  let hash s = sha224 (String.concat "" ["\000"; s])
+  let hash_of_bytes b =
+    assert (Bytes.length b = 24) ; b
+end
 
 (** Key-value store for leaf data using reference counting
     for deletion. TODO provide persistence to disk. *)
-module Data : sig
+module KeyValueStore : sig
   (** Type of values being inserted in the key value table. *)
-  type value
-
-  (** Type of a hash, used as key to the value. *)
-  type hash
 
   (** Type of a key-value store. *)
   type t
 
-  (** Empty table *)
-  val empty: unit -> t
-
-  (** Returns the key for a piece of data. *)
-  val hash     : value -> hash
-
-  (** Creates a value from a string. *)
-  val value_of_string : string -> value
-
-  (** Constructs a hash from bytes. *)
-  val hash_of_bytes : bytes -> hash
+  (** New, empty table *)
+  val make : unit -> t
 
   (** Inserts a key in the table, or update the reference
       count if the key is already present. *)
-  val insert   : t -> value -> hash
+  val insert   : t -> Value.t -> Value.hash
 
   (** Gets a value from the table, returns None if the key
       is not present. *)
-  val get_opt  : t -> hash -> value option
+  val get_opt  : t -> Value.hash -> Value.t option
 
   (** Decrements the reference counter of a key in the table.
       Deletes the key if the counter falls to 0. *)
-  val decr     : t -> hash -> unit
+  val decr     : t -> Value.hash -> unit
 end = struct
-  type value = bytes
-  type hash = bytes
-  type t = (hash, (value * int)) Hashtbl.t
-  let empty () = Hashtbl.create 0
-  let hash = sha192
-  let hash_of_bytes b = b
-  let value_of_string = Bytes.of_string
+  type t = (Value.hash, (Value.t * int)) Hashtbl.t
+  let make () = Hashtbl.create 0
+
   let insert table value =
-    let h = hash value in
+    let h = Value.hash value in
     match Hashtbl.find_opt table h with
     | None -> Hashtbl.add table h (value, 1) ; h
     | Some (_, count) -> Hashtbl.replace table h (value, count+1) ; h
@@ -64,170 +84,225 @@ end = struct
     | Some (v, count) -> Printf.printf "some %d\n" count ; Hashtbl.replace table h (v, count-1)
 end
 
-(** A trie, replicated on disk. *)
-module Tries : sig
 
-  (** A set of trees with shared nodes, with disk storage. *)
-  type tries
 
-  (** The root of a tree. *)
+(** A functional Merkle trie with persistence to disk. *)
+module Forest : sig
+
+  (** A set of trees with shared nodes, stored on disk. *)
+  type forest
+
+  (** The root of a tree in the forest. *)
   type root
 
-  (** Hash of a node in the tree. *)
+  (** Hash of a node in the forest. *)
   type hash
 
-  (** Key to add values in the tree. *)
-  type path
-
-  (** Creates a path out of a hash. *)
-  val make_path : bytes -> path
 
   (** Create a new trie. *)
-  val create : namespace:string -> leaf_table:Data.t -> tries
+  val create : KeyValueStore.t -> filename:string -> forest
 
   (** Create a new, empty root in the trie. *)
-  val empty  : tries -> root
+  val empty  : forest -> root
 
   (** Commits a root to disk. *)
   val commit : root -> unit
 
   (** Gets a root by its hash *)
-  val get_opt : tries -> hash -> root option
+  val get_opt : forest -> hash -> root option
 
   (** Update or inserts a value in a root. *)
-  val upsert : root -> path -> Data.value -> root
+  val upsert : root -> Path.path -> Value.t -> root
 
   (** Deletes a value from a root. *)
-  val delete : root -> path -> root
+  val delete : root -> Path.path -> root
 
-  (** Delete a list of roots, given by their hash, in the tries. *)
-  val gc     : tries -> hash list -> unit
+  (** Delete a list of roots, given by their hash, in the forest. *)
+  val gc     : forest -> hash list -> unit
 
 end = struct
 
-  (* Index to access nodes in the arrays.*)
+  type hash = string
   type index = Stdint.uint32
-  type hash = Bytes.t
-  type path = Bytes.t
 
-  type tries =
-    {
-      namespace : string ;
-      array : (char, CamlinternalBigarray.int8_unsigned_elt,
-               CamlinternalBigarray.c_layout) Bigarray.Array1.t ;
-      leaf_table  : Data.t ;
-      roots_table : (path, index) Hashtbl.t
-    }
-
-  type node =
-    | View of view_node * (index option)
+  type view =
+    { node : view_node ; index : index option; hash : hash option }
+  and node =
+    | View of view
     | Disk of index
     | Null
   and view_node =
       Internal of node * node
-    | Leaf of path * Data.value
+    | Bud of Path.segment * node
+    | Leaf of Path.segment * Value.t
 
-  type root = tries * node
+  type forest =
+    {
+      array : (char, CamlinternalBigarray.int8_unsigned_elt,
+               CamlinternalBigarray.c_layout) Bigarray.Array1.t ;
+      mutable length : Stdint.uint32 ;
+      leaf_table  : KeyValueStore.t ;
+      roots_table : (hash, index) Hashtbl.t
+    }
 
-  let empty tries = (tries, Null)
+  type root = forest * node
 
-  type side = Left | Right
-  let get_bit path d =
-    if (int_of_char (Bytes.get path (d / 8))) land (1 lsl (d mod 8)) = 1 then
-      Left
-    else
-      Right
+  let empty forest = (forest, Null)
 
-  let array_slice_to_bytes array a b =
-    let bytes = Bytes.create (b - a) in
-    for i = a to b - 1 do
+
+  let array_cell array index =
+    let offset = 32 * Stdint.Uint32.to_int index in
+    let bytes = Bytes.create 32 in
+    for i = offset to offset + 31 do
       Bytes.set bytes i (Bigarray.Array1.get array i)
     done ; bytes
 
-  let load_node tries index =
+  (* Loads and parse a node from the disk mapped array. *)
+  let load_node forest index =
     if index = Stdint.Uint32.zero then Null
     else
-      let offset = 32 * (Stdint.Uint32.to_int index) in
-      let bytes = array_slice_to_bytes tries.array offset (offset + 32) in
-      if (Bytes.get bytes 0 |> int_of_char) land 1 == 0 then
-        let left  = Stdint.Uint32.of_bytes_big_endian bytes 24
-        and right = Stdint.Uint32.of_bytes_big_endian bytes 28 in
-        View (Internal (Disk left, Disk right), Some index)
-      else
-        let path = Bytes.sub bytes 0 24
-        and leaf_offset = 32 * Stdint.Uint32.(of_bytes_big_endian bytes 25 |> to_int) in
-        let data_hash = array_slice_to_bytes tries.array leaf_offset (leaf_offset + 24) in
-        match Data.get_opt tries.leaf_table (Data.hash_of_bytes data_hash) with
-        | None -> Printf.ksprintf failwith "Unknown key %s" (Bytes.to_string data_hash)
-        | Some value -> View (Leaf (path, value), Some index)
+      let cell = array_cell forest.array index in
+      let marker_bit = ((Bytes.get cell 27 |> int_of_char) land 1 > 0) in
+      let child_index = Stdint.Uint32.of_bytes_little_endian cell 28 in
+      let previous_index = Stdint.Uint32.(index - one) in
 
-  let null_hash = Bytes.init 24 (fun _ -> '\000')
+      (* special marker to distinguish leaves from internal nodes *)
+      if child_index = Stdint.Uint32.max_int then  (* this is a leaf or a bud *)
+        let segment = Bytes.sub cell 0 28 |> Bytes.to_string |> Path.segment_of_string in
+        if marker_bit then (* this is just a leaf *)
+          let previous_cell = array_cell forest.array previous_index in
+          let data_hash = Bytes.sub previous_cell 0 28 in
+          match KeyValueStore.get_opt forest.leaf_table (Value.hash_of_bytes data_hash) with
+          | None -> Printf.ksprintf failwith "Unknown key %s" (Bytes.to_string data_hash)
+          | Some value -> View { node = Leaf (segment, value) ; index = Some index ; hash = Some data_hash }
+        else (* this is a bud *)
+          View { node = Bud (segment, Disk previous_index) ; index = Some index ; hash = None}
+      else (* this is an internal node *)
+        let (left, right) =
+          if marker_bit then
+            (child_index, previous_index)
+          else
+            (previous_index, child_index) in
+        View { node = Internal (Disk left, Disk right); index = Some index; hash = Some (Bytes.sub cell 0 28) }
 
-  let get_hash array index =
-    let offset = 32 * (Stdint.Uint32.to_int index) in
-    array_slice_to_bytes array offset (offset + 24)
+  let null_hash = Bytes.init 28 (fun _ -> '\000')
 
-  let mixhash h1 h2 =
-    sha192 (Bytes.concat Bytes.empty [h1; h2])
+  let upsert (forest, node) path value =
+    let rec upsert_aux forest path node depth value =
+      match (path, node) with
 
+      | ([ ], _) -> failwith "ran out of segments"
 
-  let upsert (tries, node) path value =
-    let rec upsert_aux tries path node depth value =
-      match node with
-      | Disk index ->
-        upsert_aux tries path (load_node tries index) depth value
-      | Null ->
-        let internal = View (Internal (Null, Null), None) in
-        upsert_aux tries path internal depth value
-      | View (view_node, _) -> begin
+      (* Load from disk and re-try *)
+      | (_, Disk index) ->
+        upsert_aux forest path (load_node forest index) depth value
+
+      (* Null node, insert a leaf directly, or a bud if need be *)
+      | ([ segment ] , Null ) -> View {node = Leaf (segment, value); index = None; hash = None}
+      | (segment :: rest, Null ) ->
+        let bud = View {node = Bud (segment, Null) ; index = None ; hash = None } in
+        upsert_aux forest rest bud 0 value
+
+      (* View node, we can actually match on the structure *)
+      | (segment :: rest, View {node = view_node ; _  }) -> begin
           match view_node with
-          | Internal (left, right) ->
-            if get_bit path depth = Left then
-              let new_left = upsert_aux tries path node (depth+1) value in
-              View (Internal (new_left, right), None)
-            else
-              let new_right = upsert_aux tries path node (depth+1) value in
-              View (Internal (left, new_right), None)
-          | Leaf (other_path, other_value) ->
-            if other_path = path then (* same path, update the key *)
-              View (Leaf (path, value), None)
+
+          (* An internal node, insert in the right branch *)
+          | Internal (left, right) -> begin
+              if Path.get_bit segment depth = Left then
+                let new_left = upsert_aux forest path node (depth+1) value in
+                View {node = Internal (new_left, right) ; index = None ; hash = None}
+              else
+                let new_right = upsert_aux forest path node (depth+1) value in
+                View {node = Internal (left, new_right) ; index = None ; hash = None}
+            end
+
+          (* A bud. If paths match, continue inserting deeper, otherwise kick down. *)
+          | Bud (bud_segment, next_root) ->
+            if segment = bud_segment then (* easy case, we move on to the next segment *)
+              upsert_aux forest rest next_root 0 value
+            else (* push bud down *)
+              let new_bud = View { node = Bud (bud_segment, next_root) ; index = None; hash = None } in
+              let internal =
+                if Path.get_bit bud_segment depth = Path.Left then
+                  View {node = Internal (new_bud, Null) ; index = None ; hash = None}
+                else
+                  View {node = Internal (Null, new_bud) ; index = None ; hash = None}
+              in
+              upsert_aux forest path internal depth value
+
+          (* A leaf *)
+          | Leaf (other_segment, other_value) ->
+
+            (* same path, update the key *)
+            if other_segment = segment then
+              if rest = [] then
+                View {node = Leaf (segment, value) ; index = None ; hash = None}
+              else begin
+                Printf.printf "WARNING ERASING A LEAF WITH A BUD" ;
+                let bud = View {node = Bud (segment, Null) ; index = None ; hash = None}
+                in upsert_aux forest rest bud 0 value
+              end
+
             else (* push down the branch *)
               begin
-                let rleft = ref Null and rright = ref Null in
-                if get_bit path depth = Left then
-                  rleft := upsert_aux tries path !rleft (depth+1) value
-                else
-                  rright := upsert_aux tries path !rright (depth+1) value ;
-                if get_bit other_path depth = Left then
-                  rleft := upsert_aux tries other_path !rleft (depth+1) other_value
-                else
-                  rright := upsert_aux tries other_path !rright (depth+1) other_value ;
-                View (Internal (!rleft, !rright), None)
+                let new_leaf = View {node = Leaf (other_segment, other_value); index = None; hash = None } in
+                let internal =
+                  if Path.get_bit other_segment depth = Path.Left then
+                    View {node = Internal (new_leaf, Null) ; index = None ; hash = None}
+                  else
+                    View {node = Internal (Null, new_leaf); index = None ; hash = None}
+                in upsert_aux forest path internal depth value
               end
         end
-    in (tries, upsert_aux tries path node 0 value)
+    in (forest, upsert_aux forest path node 0 value)
 
-  let write_internal _ _ _ = (null_hash, Stdint.Uint32.zero)
-  let write_leaf _ _ _ = (null_hash, Stdint.Uint32.zero)
+  let write_internal forest ileft iright h =
+    let b = Bytes.create 32 in
+    Bytes.blit b 0 h 0 24;
+    Stdint.Uint32.to_bytes_little_endian ileft b 24;
+    Stdint.Uint32.to_bytes_little_endian iright b 24;
+    let index = forest.length in
+    let offset = 32 * (Stdint.Uint32.to_int index) in
+    for i = 0 to 31 do
+      Bigarray.Array1.set forest.array (offset+i) (Bytes.get b i)
+    done ;
+    forest.length <- Stdint.Uint32.(index+ one);
+    index
 
-  let commit (tries, node) =
-    let rec commit_aux tries node depth =
+  let write_leaf forest path value =
+    let h = KeyValueStore.insert forest.leaf_table value in
+    let index = forest.length in
+    failwith "not implemented"
+ (*
+    let offset = 32 * (Stdint.Uint32.to_int index) in
+    let b = Bytes.create 32 in
+    Bytes.blit b 0 path 0 24;
+    Stdint.Uint32.(to_bytes_little_endian (index + one) b 24);
+    Stdint.Uint32.(to_bytes_little_endian int_max b 24);
+    for i = 0 to 31 do
+      Bigarray.Array1.set forest.array (offset+i) (Bytes.get b i)
+
+    (h, Stdint.Uint32.zero) *)
+
+  let commit (forest, node) =
+    let rec commit_aux forest node depth =
       match node with
       | Null -> (null_hash, Stdint.Uint32.zero)
-      | Disk index -> (get_hash tries.array index, index)
-      | View (_, Some index) -> (get_hash tries.array index, index)
+      | Disk index -> (get_hash forest.array index, index)
+      | View (_, Some index) -> (get_hash forest.array index, index)
       | View (view_node, None) -> begin
           match view_node with
           | Internal (left, right) ->
-            let (hleft, ileft)  = commit_aux tries left  (depth + 1)
-            and (hright, iright) = commit_aux tries right (depth + 1) in
+            let (hleft, ileft)  = commit_aux forest left  (depth + 1)
+            and (hright, iright) = commit_aux forest right (depth + 1) in
             let h = mixhash hleft hright
-            in write_internal ileft iright h
-          | Leaf (path, value) -> write_leaf path value depth
+            in (h, write_internal forest ileft iright h)
+          | Leaf (path, value) -> write_leaf forest path valeu
         end
     in
-    let (hash, index) = commit_aux tries node 0 in
-    Hashtbl.add tries.roots_table hash index
+    let (hash, index) = commit_aux forest node 0 in
+    Hashtbl.add forest.roots_table hash index
 
 
 
@@ -236,11 +311,17 @@ end = struct
 
   let get_opt _ _ = failwith "get_opt not implemented"
 
-  let create ~namespace ~leaf_table =
+  let create kv_store ~filename =
+    let fd = Unix.openfile path ~mode:[Unix.O_WRONLY ; Unix.O_CREAT] in
+    let array = Bigarray.array1_of_genarray (
+        Unix.map_file fd
+          ~pos:0L Bigarray.char Bigarray.c_layout true [|1000 * 32|])
+    in
     {
-      namespace = namespace ;
-      array = Bigarray.Array1.create Bigarray.char Bigarray.C_layout 10000 ;
-      leaf_table  = leaf_table  ;
+
+      array  ;
+      length = Stdint.Uint32.one; (* index 0 is implicitely the null leaf *)
+      leaf_table  = kv_store  ;
       roots_table = Hashtbl.create 0
     }
 
