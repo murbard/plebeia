@@ -124,7 +124,7 @@ module Forest : sig
   val get_opt : forest -> hash -> (indexed, hashed) root option
 
   (** Update or inserts a value in a root. *)
-  val upsert : ('ia, 'ha) root -> Path.path -> Value.t -> ('ib, 'hb) root
+  val upsert : ('ia, 'ha) root -> Path.path -> Value.t -> (not_indexed, not_hashed) root
 
   (** Deletes a value from a root. *)
   val delete : ('ia, 'ha) root -> Path.path -> ('ib, 'hb) root
@@ -263,7 +263,9 @@ end = struct
         end
 
 
-  let rec hash : type i h. forest -> (i, h) node -> (i, hashed) node =
+
+  let hash (forest, node) =
+    let rec hash_aux : type i h. forest -> (i, h) node -> (i, hashed) node =
     fun forest node -> match node with
       | Disk index -> load_node forest index
       | Null -> Null
@@ -277,27 +279,25 @@ end = struct
           (* Hash recursively *)
 
           | Internal (left, right, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any) ->
-            let left = hash forest left and right = hash forest right
+            let left = hash_aux forest left and right = hash_aux forest right
             in let h = node_hash ~left:(get_hash left) ~right:(get_hash right) in
             View (Internal (left, right, Left_Not_Indexed, Hashed h, Not_Indexed_Any))
 
           | Internal (left, right, Right_Not_Indexed, Not_Hashed, Not_Indexed_Any) ->
-            let left = hash forest left and right = hash forest right
+            let left = hash_aux forest left and right = hash_aux forest right
             in let h = node_hash ~left:(get_hash left) ~right:(get_hash right) in
             View (Internal (left, right, Right_Not_Indexed, Hashed h, Not_Indexed_Any))
 
           | Bud (segment, root, w, Not_Hashed, Not_Indexed_Any) ->
-            let root = hash forest root in let h = get_hash root in
+            let root = hash_aux forest root in let h = get_hash root in
             View (Bud (segment, root, w, Hashed h, Not_Indexed_Any))
 
           | Leaf (segment, value, w, Not_Hashed, Not_Indexed_Any) ->
             View( Leaf (segment, value, w, Hashed Value.(string_of_hash (hash value)), Not_Indexed_Any))
 
         | _ -> .
-
-
-
-      end
+        end
+    in (forest, hash_aux forest node)
 
 
   let write_internal forest ileft iright h =
@@ -319,7 +319,8 @@ end = struct
     ignore h ; ignore index ; ignore path ;
     failwith "not implemented"
 
-  let rec commit : type i h. forest -> (i, hashed) node -> (indexed, hashed) node  =
+  let commit (forest, node) =
+    let rec commit_aux : type i h. forest -> (i, hashed) node -> (indexed, hashed) node  =
     fun forest node ->
       match node with
       | Null -> node
@@ -333,30 +334,30 @@ end = struct
 
           (* some non indexed *)
           | Internal (left, right, Left_Not_Indexed, Hashed h, _) ->
-            let right = commit forest right
-            and left = commit forest left in
+            let right = commit_aux forest right
+            and left = commit_aux forest left in
             ignore (right, left) ; (* now commit the node *)
             View (Internal (left, right, All_Indexed (Stdint.Uint32.of_int 42), Hashed h, Indexed_and_Hashed))
 
           | Internal (left, right, Right_Not_Indexed, Hashed h, _) ->
-            let left = commit forest left
-            and right = commit forest right in
+            let left = commit_aux forest left
+            and right = commit_aux forest right in
             ignore (right, left) ; (* now commit the node *)
             View (Internal (left, right, All_Indexed (Stdint.Uint32.of_int 42), Hashed h, Indexed_and_Hashed))
 
           | Leaf (path, value, _, Hashed h, _ ) -> View (Leaf (path, value, Indexed (Stdint.Uint32.of_int 42), Hashed h, Indexed_and_Hashed))
 
           | Bud (path, root, _, Hashed h, _ ) ->
-            let root = commit forest root in
+            let root = commit_aux forest root in
             ignore (root) ;
             View (Bud (path, root, Indexed (Stdint.Uint32.of_int 42), Hashed h, Indexed_and_Hashed))
 
           | _ -> .
-
-          end
+        end
+    in (forest, commit_aux forest node)
 
   let upsert (forest, node) path value =
-    let rec upsert_aux : type i h. forest -> Path.path -> (i, h) node -> int -> Value.t -> (i, h) node =
+    let rec upsert_aux :  type ia ha . forest -> Path.path -> (ia, ha) node -> int -> Value.t -> ('ib, 'hb) node =
       fun forest path node depth value -> begin
           match (path, node) with
 
@@ -368,59 +369,60 @@ end = struct
 
           (* Null node, insert a leaf directly, or a bud if need be *)
           | ([ segment ] , Null ) -> View (Leaf (segment, value, Not_Indexed, Not_Hashed, Not_Indexed_Any))
+
           | (segment :: rest, Null ) ->
             let bud = View ( Bud (segment, Null, Not_Indexed, Not_Hashed, Not_Indexed_Any) ) in
             upsert_aux forest rest bud 0 value
 
           (* View node, we can actually match on the structure *)
-          | (segment :: rest, View {node = view_node ; _  }) -> begin
+          | (segment :: rest, View view_node) -> begin
               match view_node with
 
-              (* An internal node, insert in the right branch *)
-              | Internal (left, right) -> begin
+              (* An internal node, insert in the correct branch *)
+              | Internal (left, right, _, _, _) -> begin
                   if Path.get_bit segment depth = Left then
                     let new_left = upsert_aux forest path node (depth+1) value in
-                    View {node = Internal (new_left, right) ; index = None ; hash = None}
+                    View ( Internal (new_left, right, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any) )
                   else
                     let new_right = upsert_aux forest path node (depth+1) value in
-                    View {node = Internal (left, new_right) ; index = None ; hash = None}
+                    View ( Internal (left, new_right, Right_Not_Indexed, Not_Hashed, Not_Indexed_Any) )
                 end
 
               (* A bud. If paths match, continue inserting deeper, otherwise kick down. *)
-              | Bud (bud_segment, next_root) ->
+              | Bud (bud_segment, next_root, _, _, _) ->
                 if segment = bud_segment then (* easy case, we move on to the next segment *)
                   upsert_aux forest rest next_root 0 value
                 else (* push bud down *)
-                  let new_bud = View { node = Bud (bud_segment, next_root) ; index = None; hash = None } in
+                  let new_bud = View ( Bud (bud_segment, next_root, Not_Indexed, Not_Hashed, Not_Indexed_Any) ) in
                   let internal =
                   if Path.get_bit bud_segment depth = Path.Left then
-                    View {node = Internal (new_bud, Null) ; index = None ; hash = None}
+                    View (Internal (new_bud, Null, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any))
                   else
-                    View {node = Internal (Null, new_bud) ; index = None ; hash = None}
+                    View (Internal (Null, new_bud, Right_Not_Indexed, Not_Hashed, Not_Indexed_Any))
                   in
                   upsert_aux forest path internal depth value
 
               (* A leaf *)
-              | Leaf (other_segment, other_value) ->
+              | Leaf (other_segment, other_value, _, _ , _) ->
 
               (* same path, update the key *)
                 if other_segment = segment then
                   if rest = [] then
-                    View {node = Leaf (segment, value) ; index = None ; hash = None}
+                    View (Leaf (segment, value, Not_Indexed, Not_Hashed, Not_Indexed_Any))
                   else begin
                     Printf.printf "WARNING ERASING A LEAF WITH A BUD" ;
-                    let bud = View {node = Bud (segment, Null) ; index = None ; hash = None}
+                    let bud = View ( Bud (segment, Null, Not_Indexed, Not_Hashed, Not_Indexed_Any) )
                     in upsert_aux forest rest bud 0 value
                   end
 
               else (* push down the branch *)
                 begin
-                  let new_leaf = View {node = Leaf (other_segment, other_value); index = None; hash = None } in
+                  let new_leaf = View (Leaf (other_segment, other_value, Not_Indexed, Not_Hashed, Not_Indexed_Any )) in
                   let internal =
                     if Path.get_bit other_segment depth = Path.Left then
-                      View {node = Internal (new_leaf, Null) ; index = None ; hash = None}
+                      View ( Internal (new_leaf, Null, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)  )
                     else
-                      View {node = Internal (Null, new_leaf); index = None ; hash = None}
+                      View ( Internal (Null, new_leaf, Right_Not_Indexed, Not_Hashed, Not_Indexed_Any) )
                   in upsert_aux forest path internal depth value
                 end
             end
@@ -431,7 +433,7 @@ end = struct
 
 
   let create kv_store ~filename =
-    let fd = Unix.openfile path ~mode:[Unix.O_WRONLY ; Unix.O_CREAT] in
+    let fd = Unix.openfile filename [Unix.O_WRONLY ; Unix.O_CREAT] 660 in
     let array = Bigarray.array1_of_genarray (
         Unix.map_file fd
           ~pos:0L Bigarray.char Bigarray.c_layout true [|1000 * 32|])
