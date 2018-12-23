@@ -1,4 +1,0 @@
-(library
- (name context)
- (libraries stdint res nocrypto)
- (modules context))

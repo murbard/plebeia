@@ -1,0 +1,3 @@
+(library
+ (public_name plebeia)
+ (libraries bigstring stdint res nocrypto))
