@@ -217,8 +217,7 @@ and ('ia, 'ha) view =
 
 type context =
   {
-    array : (char, CamlinternalBigarray.int8_unsigned_elt,
-             CamlinternalBigarray.c_layout) Bigarray.Array1.t ;
+    array : Bigstring.t ;
     (* mmaped array where the nodes are written and indexed. *)
 
     mutable length : Stdint.uint32 ;
@@ -238,7 +237,7 @@ type ('i, 'h) tree =
   }
 
 let make_context ~filename = ignore filename ;
-  { array  = Bigarray.Array1.create Bigarray.char Bigarray.c_layout 42 ;
+  { array  = Bigstring.create 42 ;
     length = Stdint.Uint32.zero ;
     leaf_table = KeyValueStore.make () ;
     roots_table = Hashtbl.create 1
