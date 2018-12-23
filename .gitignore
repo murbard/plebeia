@@ -1,5 +1,4 @@
 
-## /!\ /!\ Update .dockerignore accordingly /!\ /!\
 
 .DS_Store
 __pycache__
@@ -7,8 +6,6 @@ __pycache__
 
 /_build
 /_opam
-/_docker_build
-/docs/_build
 
 
 dune-project
