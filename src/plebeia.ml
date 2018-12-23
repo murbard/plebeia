@@ -122,12 +122,6 @@ end = struct
       Hashtbl.replace table h (v, count-1)
 end
 
-
-
-
-type index = Stdint.uint32
-type hash = bytes
-
 type indexed type not_indexed
 type hashed type not_hashed
 
@@ -140,13 +134,13 @@ type ('ia, 'ha) indexed_implies_hashed =
   (* Type used to prove that all indexed nodes have been hashed. *)
 
 type ('ha, 'hb, 'hc) hashed_is_transitive =
-  | Hashed : hash -> (hashed, hashed, hashed) hashed_is_transitive
+  | Hashed : Bigstring.t -> (hashed, hashed, hashed) hashed_is_transitive
   | Not_Hashed : (not_hashed, 'hb, 'hc) hashed_is_transitive
   (* Type used to prove that if a node is hashed then so are its children.
      The type also provides the hash as a witness.*)
 
 type ('ia, 'ib, 'ic) internal_node_indexing_rule =
-  | All_Indexed : index -> (indexed, indexed, indexed) internal_node_indexing_rule
+  | All_Indexed : int64 -> (indexed, indexed, indexed) internal_node_indexing_rule
   | Left_Not_Indexed  : (not_indexed, not_indexed, 'ic) internal_node_indexing_rule
   | Right_Not_Indexed : (not_indexed, 'ib, not_indexed) internal_node_indexing_rule
   (* This rule expresses the following invariant : if a node is indexed, then
@@ -157,18 +151,18 @@ type ('ia, 'ib, 'ic) internal_node_indexing_rule =
      disk, at least one of the child can be written adjacent to its parent. *)
 
 type ('ia, 'ib) indexing_rule =
-  | Indexed : index -> (indexed, indexed) indexing_rule
+  | Indexed : int64 -> (indexed, indexed) indexing_rule
   | Not_Indexed : (not_indexed, 'ib) indexing_rule
   (* Type used to prove that if a node is indexed, then so are its
      children. Provides the index as a witness. *)
 
 type ('ia, 'ha) node =
-  | Null : (indexed, hashed ) node
+  | Null : (indexed, hashed) node
   (* Null nodes, used when the tree is small. As the tree becomes bigger,
      the leaf and bud segment of path is always large enough to accomodate the
      rest of the segment and Null nodes become vanishingly unlikely. *)
 
-  | Disk : index -> (indexed, hashed) node
+  | Disk : int64 -> (indexed, hashed) node
   (* Represents a node stored on the disk at a given index, the node hasn't
      been loaded yet. Although it's considered hash for simplicity's sake,
      reading the hash requires a disk access and is expensive. *)
@@ -220,25 +214,33 @@ type context =
     array : Bigstring.t ;
     (* mmaped array where the nodes are written and indexed. *)
 
-    mutable length : Stdint.uint32 ;
+    mutable length : int64 ;
     (* Current length of the node table. *)
 
     leaf_table  : KeyValueStore.t ;
     (* Hash table  mapping leaf hashes to their values. *)
 
-    roots_table : (hash, index) Hashtbl.t
+    roots_table : (Bigstring.t, int64) Hashtbl.t
     (* Hash table mapping root hashes to indices in the array. *)
   }
 
 type ('i, 'h) tree =
+
   {
     context : context ;
-    mutable : (not_indexed, not_hashed) root
+    mutable root : (not_indexed, not_hashed) node
   }
 
-let make_context ~filename = ignore filename ;
-  { array  = Bigstring.create 42 ;
-    length = Stdint.Uint32.zero ;
+let make_context ?pos ?(shared=false) ?(length=(-1)) fn =
+  let fd = Unix.openfile fn [O_RDWR] 0o644 in
+  let array =
+    (* length = -1 means that the size of [fn] determines the size of
+       [array]. *)
+    let open Bigarray in
+    array1_of_genarray @@ Unix.map_file fd ?pos
+      char c_layout shared [| length |] in
+  { array ;
+    length = 0L ;
     leaf_table = KeyValueStore.make () ;
     roots_table = Hashtbl.create 1
   }
@@ -263,7 +265,7 @@ let rec string_of_tree : type i h . (i, h) node -> int -> string =
     let indent_string = String.concat "" (List.init indent (fun _ -> " . ")) in
     match root with
     | Null -> Printf.sprintf "%s Null\n" indent_string
-    | Disk index -> Printf.sprintf "%sDisk %d" indent_string (Stdint.Uint32.to_int index)
+    | Disk index -> Printf.sprintf "%sDisk %Ld" indent_string index
     | View (Leaf (value, _, _, _)) ->
       Printf.sprintf "%sLeaf %s\n" indent_string (Value.to_string value)
     | View (Bud  (node , _, _, _)) ->
@@ -408,5 +410,8 @@ let upsert : type i h .
 
 
 
-let context = Tree.make_context ~filename:"foo"
-let root = Tree.empty
+let context =
+  let fn = Filename.temp_file "plebeia" "test" in
+  make_context ~shared:true ~length:1024 fn
+
+let root = empty
