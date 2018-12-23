@@ -46,6 +46,10 @@ val update: cursor -> segment -> value -> cursor option
 val upsert: cursor -> segment -> value -> cursor option
 (** Upserts. This can still fail if the segment leads to a subtree. *)
 
+val snapshot: cursor -> segment -> segment -> cursor option
+(** Snapshots a subtree at segment and place a soft link to it at another
+ segmentsegment location. *)
+
 val commit: cursor -> hash
 (** Commits the change made in a cursor to disk. Returns the new root hash. *)
 
