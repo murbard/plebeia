@@ -21,6 +21,11 @@ val open_context : filename:string -> context
 (** Opens or creates a new context backed up at a given location
     in the filesystem. *)
 
+val gc: src:context -> hash list -> dest:context -> unit
+(** Copies from the src context trees rooted in the hash list
+    into a new context. Used for garbage collection. *)
+
+
 val root : context -> hash -> cursor option
 (** Gets the root cursor corresponding to a given root hash in the
     context. *)
