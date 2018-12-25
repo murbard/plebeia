@@ -54,7 +54,7 @@ If it turns out this doesn't make a noticeable difference, it's straightforward 
 the size of cells to 320 bits, or introduce variable size cells, and remove much of the
 akwardness.
 
-Internal node:
+- Internal node:
 
  - First 223 bits: first 223 bit of the hash of the internal node. The last bit does not
  need to be stored as it's always 0, by convention, and the next 224 bits are just 223 0s
@@ -66,15 +66,15 @@ Internal node:
  - Next 32 bits: index of either the left or right child. The other child is always stored
    at the index preceding the internal node.
 
-For reasons which will become clear the index can only grow to 2^32 - 34.
+ For reasons which will become clear the index can only grow to 2^32 - 34.
 
-Extender node:
+- Extender node:
 
  - First 223 bits: segment
  - 224th bit: 0
  - Last 32 bits: 2^32 - 33.
 
-Leaf node:
+- Leaf node:
 
  - First 224 bits: hash of the value
 
@@ -84,11 +84,11 @@ Leaf node:
    previous cell. This is helpful to avoid having to hit the  key-value table for
    small values, but it does create some duplication. To be benchmarked...
 
-Bud node:
+- Bud node:
 
  - First 224 bits: 1's
  - Last 32 bits: index of the child node.
 
- It could seem at first that we might not need to store bud nodes at all, but they are
+  It could seem at first that we might not need to store bud nodes at all, but they are
  helpful when creating snapshots, to preserve the property that a non-indexed
- internal node never point to two indexed children.
+ internal node never points to two indexed children.
