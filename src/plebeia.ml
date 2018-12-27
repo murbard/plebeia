@@ -242,7 +242,6 @@ let make_context ?pos ?(shared=false) ?(length=(-1)) fn =
     roots_table = Hashtbl.create 1
   }
 
-let empty = Null
 
 let make_internal :
   (not_indexed, not_hashed) node ->
@@ -276,27 +275,52 @@ let rec string_of_tree : type i h . (i, h) node -> int -> string =
       Printf.sprintf "%sExtender:\n%s" indent_string
         (string_of_tree node (indent + 1))
 
-type ('i, 'h) trail =
-  | Top      : ('i, 'h) trail
-  | Left     : ('i, 'h) node * ('ib, 'hb) trail -> ('i, 'h) trail
-  | Right    : ('i, 'h) node * ('ib, 'hb) trail -> ('i, 'h) trail
-  | Budded   : ('i, 'h) trail
-  | Extended : Path.segment -> ('i, 'h) trail
+type trail =
+  | Top      : trail
+  | Left     : ('i, 'h) node * trail -> trail
+  | Right    : ('i, 'h) node * trail -> trail
+  | Budded   : trail
+  | Extended : Path.segment -> trail
 
-type ('itr, 'htr, 'ind, 'hnd) cursor =
-  { trail : ('itr, 'htr) trail ; node : ('ind, 'hnd) node ; context : context }
+type untyped_node =
+  | Node : ('i, 'h) node -> untyped_node
+
+type cursor =
+  { trail : trail ; node : untyped_node ; context : context }
+
+let empty context = { context ; trail = Top ; node = Node Null }
 
 let (>>=) y f = match y with
   | Ok x -> Ok (f x)
   | Error e -> Error e
 
 type error = string
+type value = Value.t
+type segment = Path.segment
+type hash = Bigstring.t
 
-let upsert : type itr htr ind hnd .
-  (itr, htr, ind, hnd) cursor ->
+let commit _ = failwith "not implemented"
+let snapshot _ _ _ = failwith "not implemented"
+let update _ _ _ = failwith "not implemented"
+let insert _ _ _ = failwith "not implemented"
+let get _ _ = failwith "not implemented"
+let parent _ = failwith "not implemented"
+let subtree _ _ = failwith "not implemented"
+let gc ~src:_ _ ~dest:_ = failwith "not implemented"
+let hash _ = failwith "not implemented"
+let open_context ~filename:_ = failwith "not implemented"
+let root _ _ = failwith "not implemented"
+
+
+(* todo, implement get / insert / upsert by using
+   a function returning a zipper and then separate
+   functions to do the edit *)
+
+
+let upsert : cursor ->
   Path.segment ->
   Value.t ->
-  ((itr, htr, 'inda, 'hmda) cursor, error) result =
+  (cursor, error) result =
 
   fun cursor segment value ->
 
@@ -425,13 +449,10 @@ let upsert : type itr htr ind hnd .
               end
           end
     in
-    upsert_aux cursor.node segment Path.dummy_side >>=
-    fun node ->  {cursor with node = node}
-
-
+    let Node node = cursor.node in
+    upsert_aux node segment Path.dummy_side >>=
+    fun node ->  {cursor with node = Node node}
 
 let context =
   let fn = Filename.temp_file "plebeia" "test" in
   make_context ~shared:true ~length:1024 fn
-
-let root = empty

@@ -27,7 +27,6 @@ val gc: src:context -> hash list -> dest:context -> unit
 (** Copies from the src context trees rooted in the hash list
     into a new context. Used for garbage collection. *)
 
-
 val root : context -> hash -> (cursor, error) result
 (** Gets the root cursor corresponding to a given root hash in the
     context. *)
