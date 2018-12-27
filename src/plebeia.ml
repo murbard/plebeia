@@ -17,12 +17,12 @@ module Path : sig
 
   val dummy_side : side
 
+
   type segment = private side list
   (** A segment is always just a list of sides. TODO: use bit arithmetic for
       speed and memory footprint.*)
 
-  type path = segment list
-  (** A path is a list of full segments. *)
+  val empty : segment
 
   val cut : segment -> (side * segment) option
   (** Cuts a path into a head and tail if not empty. *)
@@ -40,6 +40,7 @@ end = struct
   let cut = function
     | [] -> None
     | h::t -> Some (h,t)
+  let empty = []
 
   let rec common_prefix seg1 seg2 = match (seg1, seg2) with
     | (h1 :: t1, h2 :: t2) ->
@@ -157,11 +158,7 @@ type ('ia, 'ib) indexing_rule =
      children. Provides the index as a witness. *)
 
 type ('ia, 'ha) node =
-  | Null : (indexed, hashed) node
-  (* Null nodes, used when the tree is small. As the tree becomes bigger,
-     the leaf and bud segment of path is always large enough to accomodate the
-     rest of the segment and Null nodes become vanishingly unlikely. *)
-
+  | Null     : (indexed, hashed) node
   | Disk : int64 -> (indexed, hashed) node
   (* Represents a node stored on the disk at a given index, the node hasn't
      been loaded yet. Although it's considered hash for simplicity's sake,
@@ -279,72 +276,87 @@ let rec string_of_tree : type i h . (i, h) node -> int -> string =
       Printf.sprintf "%sExtender:\n%s" indent_string
         (string_of_tree node (indent + 1))
 
+type ('i, 'h) trail =
+  | Top      : ('i, 'h) trail
+  | Left     : ('i, 'h) node * ('ib, 'hb) trail -> ('i, 'h) trail
+  | Right    : ('i, 'h) node * ('ib, 'hb) trail -> ('i, 'h) trail
+  | Budded   : ('i, 'h) trail
+  | Extended : Path.segment -> ('i, 'h) trail
 
-let upsert : type i h .
-  context ->
-  (i, h) node ->
-  Path.path ->
+type ('itr, 'htr, 'ind, 'hnd) cursor =
+  { trail : ('itr, 'htr) trail ; node : ('ind, 'hnd) node ; context : context }
+
+let (>>=) y f = match y with
+  | Ok x -> Ok (f x)
+  | Error e -> Error e
+
+type error = string
+
+let upsert : type itr htr ind hnd .
+  (itr, htr, ind, hnd) cursor ->
+  Path.segment ->
   Value.t ->
-  ('ib, 'hb) node =
+  ((itr, htr, 'inda, 'hmda) cursor, error) result =
 
-  fun context node path value ->
+  fun cursor segment value ->
 
     let extend : Path.segment -> (not_indexed, not_hashed) node -> (not_indexed, not_hashed) node =
       fun segment node -> match Path.cut segment with
         | None   -> node
-        | Some _ -> View (Extender (segment, node, Not_Indexed, Not_Hashed, Not_Indexed_Any)) in
+        | Some _ -> View (Extender (segment, node, Not_Indexed, Not_Hashed, Not_Indexed_Any))
+    in
 
     let leaf = View (Leaf (value, Not_Indexed, Not_Hashed, Not_Indexed_Any)) in
 
-    let rec upsert_aux : type ia ha .
-      (ia, ha) node ->
-      Path.path ->
-      Path.side -> ('ib, 'hb) node =
-      fun node path side ->
-        match (path, node) with
+    let context = cursor.context in
 
-        | ([ ], _) -> failwith "Ran out of segments without terminating."
-        (* No segment shouldn't happen. *)
+    let rec upsert_aux : type i h .
+      (i,h) node ->
+      Path.segment ->
+      Path.side ->
+      (('ib, 'hb) node, error) result =
+
+      fun node segment side ->
+        match (segment, node) with
 
         | (_, Disk index) ->
-          upsert_aux (load_node context index) path side
+          upsert_aux (load_node context index) segment side
+
         (* If we encounter a node still on the disk, load it and retry. *)
 
-        | ([segment], Null) -> extend segment leaf
+        | (_, Null) -> Ok (extend segment leaf)
 
-        | (segment :: remaining_path, Null) ->
-          let bud = View (Bud (
-              upsert_aux Null remaining_path Path.dummy_side,
-              Not_Indexed, Not_Hashed, Not_Indexed_Any)) in
-          extend segment bud
-
-        | (segment :: remaining_path, View view_node) -> begin
+        | (segment, View view_node) -> begin
             match view_node with
 
             | Internal (left, right, _, _, _) -> begin
                 match Path.cut segment with
                 | Some (Left, remaining_segment) ->
+
+                  upsert_aux left remaining_segment Path.Left >>=
+                  fun new_left ->
                   View (
                     Internal (
-                      upsert_aux left (remaining_segment::remaining_path) Path.Left, right,
+                      new_left, right,
                       Left_Not_Indexed, Not_Hashed, Not_Indexed_Any))
-                | Some (Right, remaining_segment) -> View (
+
+
+                | Some (Right, remaining_segment) ->
+                  upsert_aux right remaining_segment Path.Right >>=
+                  fun new_right ->
+                  View (
                     Internal (
-                      left, upsert_aux right (remaining_segment::remaining_path) Path.Right,
+                      left, new_right,
                       Right_Not_Indexed, Not_Hashed, Not_Indexed_Any))
+
 
                 | None -> assert false (* a segment can't end on an internal node, by construction *)
               end
 
-            | Leaf (other_value, _, _, _) ->
-              ignore other_value;
-              assert (remaining_path = []); (* FIXME, better handling of leaf / bud conflict *)
-              leaf (* Upserting !!! *)
+            | Leaf (_, _, _, _) ->
+              Ok leaf (* Upserting !!! *)
 
-            | Bud (next_root, _, _, _) -> View (
-                Bud (
-                  upsert_aux next_root remaining_path Path.dummy_side,
-                  Not_Indexed, Not_Hashed, Not_Indexed_Any))
+            | Bud _ -> Error "tried to upsert a value into a bud"
 
             | Extender (extender_segment, node, _, _, _) ->
               let (common_segment, remaining_segment, remaining_extender) =
@@ -364,24 +376,27 @@ let upsert : type i h .
                    and an extender followed by the node otherwise
                 *)
 
-
                 match (Path.cut remaining_segment, Path.cut remaining_extender) with
 
-                | (None, None) -> upsert_aux node remaining_path Path.dummy_side
+                | (None, None) -> upsert_aux node Path.empty Path.dummy_side
                 (* we traveled the length of the extender *)
 
                 | (Some (Left, remaining_segment), Some (Right, remaining_extender)) -> begin
                     match Path.cut remaining_extender with
                     | None ->
+                      upsert_aux Null remaining_segment Path.Left >>=
+                      fun new_left ->
                       extend common_segment (View (
                           Internal (
-                            upsert_aux Null (remaining_segment::remaining_path) Path.Left,
+                            new_left,
                             node,
                             Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                     | Some _ ->
+                      upsert_aux Null remaining_segment Path.Left >>=
+                      fun new_left ->
                       extend common_segment (View (
                           Internal (
-                            upsert_aux Null (remaining_segment::remaining_path) Path.Left,
+                            new_left,
                             View (Extender (remaining_extender, node, Not_Indexed, Not_Hashed, Not_Indexed_Any)),
                             Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                   end
@@ -389,16 +404,20 @@ let upsert : type i h .
                 | (Some (Right, remaining_segment), Some (Left, remaining_extender)) -> begin
                     match Path.cut remaining_extender with
                     | None ->
+                      upsert_aux Null remaining_segment Path.Right >>=
+                      fun new_right ->
                       extend common_segment (View (
                           Internal (
                             node,
-                            upsert_aux Null (remaining_segment::remaining_path) Path.Right,
+                            new_right,
                             Right_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                     | Some _ ->
+                      upsert_aux Null remaining_segment Path.Right >>=
+                      fun new_right ->
                       extend common_segment (View (
                           Internal (
                             View (Extender (remaining_extender, node, Not_Indexed, Not_Hashed, Not_Indexed_Any)),
-                            upsert_aux Null (remaining_segment::remaining_path) Path.Right,
+                            new_right,
                             Right_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                   end
 
@@ -406,7 +425,8 @@ let upsert : type i h .
               end
           end
     in
-    upsert_aux node path Path.dummy_side
+    upsert_aux cursor.node segment Path.dummy_side >>=
+    fun node ->  {cursor with node = node}
 
 
 

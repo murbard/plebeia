@@ -15,6 +15,8 @@ type segment
 (** A segment represents a path from the root of a tree to a leaf or
     to the root of a sub-tree. *)
 
+type error
+
 type value
 
 val open_context : filename:string -> context
@@ -26,36 +28,36 @@ val gc: src:context -> hash list -> dest:context -> unit
     into a new context. Used for garbage collection. *)
 
 
-val root : context -> hash -> cursor option
+val root : context -> hash -> (cursor, error) result
 (** Gets the root cursor corresponding to a given root hash in the
     context. *)
 
 val empty : context -> cursor
 (** Creates a cursor to a new, empty tree. *)
 
-val subtree : cursor -> segment -> cursor option
+val subtree : cursor -> segment -> (cursor, error) result
 (** Moves the cursor down a segment, to the root of a sub-tree. Think
     "cd segment/" *)
 
 val parent : cursor -> cursor
 (** Moves the cursor back to the parent tree. Think "cd .." *)
 
-val get : cursor -> segment -> value option
+val get : cursor -> segment -> (value, error) result
 (** Gets a value if present in the current tree at the given
     segment. *)
 
-val insert: cursor -> segment -> value -> cursor option
+val insert: cursor -> segment -> value -> (cursor, error) result
 (** Inserts a value at the given segment in the current tree.
     Returns the new cursor if successful. *)
 
-val update: cursor -> segment -> value -> cursor option
+val update: cursor -> segment -> value -> cursor
 (** Updates a value at the given segment in the current tree.
     Returns the new cursor if successful. *)
 
-val upsert: cursor -> segment -> value -> cursor option
+val upsert: cursor -> segment -> value -> (cursor, error) result
 (** Upserts. This can still fail if the segment leads to a subtree. *)
 
-val snapshot: cursor -> segment -> segment -> cursor option
+val snapshot: cursor -> segment -> segment -> (cursor, error) result
 (** Snapshots a subtree at segment and place a soft link to it at
     another segment location. *)
 
