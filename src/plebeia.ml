@@ -32,6 +32,8 @@ module Path : sig
 
   val of_side_list : side list -> segment
 
+  val to_string : segment -> string
+
 end = struct
   type side = Left | Right
   let dummy_side = Left
@@ -42,6 +44,7 @@ end = struct
     | h::t -> Some (h,t)
   let empty = []
 
+  let to_string s = String.concat "" (List.map (function Left -> "L" | Right -> "R") s)
   let rec common_prefix seg1 seg2 = match (seg1, seg2) with
     | (h1 :: t1, h2 :: t2) ->
       if h1 = h2 then
@@ -169,8 +172,12 @@ type ('ia, 'ha) node =
      to compute edits to the context. New view nodes can be commited to disk
      once the computations are done. *)
 
+and ('i, 'h) enode =
+  | Just : ('i, 'h) node -> ('i, 'h) enode
+  | Extended : Path.segment * ('i, 'h) node -> ('i, 'h) enode
+
 and ('ia, 'ha) view =
-  | Internal : ('ib, 'hb) node * ('ic, 'hc) node
+  | Internal : ('ib, 'hb) enode * ('ic, 'hc) enode
                * ('ia, 'ib, 'ic) internal_node_indexing_rule
                * ('ha, 'hb, 'hc) hashed_is_transitive
                * ('ia, 'ha) indexed_implies_hashed
@@ -179,13 +186,7 @@ and ('ia, 'ha) view =
   (* An internal node , left and right children and an internal path segment
      to represent part of the path followed by the key in the tree. *)
 
-  | Extender : Path.segment * ('ib, 'hb) node
-               * ('ia, 'ib) indexing_rule
-               * ('ha, 'hb, 'hb) hashed_is_transitive
-               * ('ia, 'ha) indexed_implies_hashed
-    -> ('ia, 'ha) view
-
-  | Bud : ('ib, 'hb) node
+  | Bud : ('ib, 'hb) enode
           * ('ia, 'ib) indexing_rule
           * ('ha, 'hb, 'hb) hashed_is_transitive
           * ('ia, 'ha) indexed_implies_hashed
@@ -206,6 +207,48 @@ and ('ia, 'ha) view =
      committing the tree to disk.
   *)
 
+
+(* A trail represents the content of the memory stack when recursively exploring a tree.
+   Constructing these trails from closure would be easier, but it would make it harder
+   to port the code to C. The type parameters of the trail keep track of the type of each
+   element on the "stack" using a product type. *)
+
+
+(* TODO this trail might need to deal with extended node in a special way, but I'm not sure *)
+type ('itrail, 'htrail) trail =
+  | Top      : ('ihole, 'hhole) trail
+  | Left     : (* we took the left branch of an internal node *)
+
+      ('iprev_hole * 'iprev_trail, 'hprev_hole * 'hprev_trail) trail *
+      (('iright, 'hright) node) *
+      ('iprev_hole, 'ihole, 'iright) internal_node_indexing_rule *
+      ('hprev_hole, 'hhole, 'hright) hashed_is_transitive *
+      ('ihole, 'hhole) indexed_implies_hashed
+
+    -> ('ihole * ('irprev_hole * 'iprev_trail),
+        'hhole * ('hprev_hole * 'hprev_trail)) trail
+
+  | Right   : (* we took the left branch of an internal node *)
+
+      (('ileft, 'hleft) node) *
+      ('iprev_hole * 'iprev_trail, 'hprev_hole * 'hprev_trail) trail *
+      ('iprev_hole, 'ileft, 'ihole) internal_node_indexing_rule *
+      ('hprev_hole, 'hleft, 'hhole) hashed_is_transitive *
+      ('ihole, 'hhole) indexed_implies_hashed
+
+    -> ('ihole * ('irprev_hole * 'iprev_trail),
+        'hhole * ('hprev_hole * 'hprev_trail)) trail
+
+  | Budded   :
+
+      ('iprev_hole * 'iprev_trail, 'hprev_hole * 'hprev_trail) trail *
+      ('iprev_hole, 'ihole) indexing_rule *
+      ('hprev_hole, 'hhole, 'hhole) hashed_is_transitive  *
+      ('ihole, 'hhole) indexed_implies_hashed
+
+    -> ('ihole * ('irprev_hole * 'iprev_trail),
+        'hhole * ('hprev_hole * 'hprev_trail)) trail
+
 type context =
   {
     array : Bigstring.t ;
@@ -221,12 +264,19 @@ type context =
     (* Hash table mapping root hashes to indices in the array. *)
   }
 
-type ('i, 'h) tree =
+(* The cursor, also known as a zipper combines the information contained in a trail and
+   a subtree to represent an edit point within a tree. This is a functional data structure
+   that represents the program point in a function that modifies a tree. *)
 
-  {
-    context : context ;
-    mutable root : (not_indexed, not_hashed) node
-  }
+
+type ('iprev, 'hprev, 'ihole, 'hhole) cursor =
+  { trail : ('ihole * 'iprev, 'hhole * 'hprev) trail ;
+    node :  ('ihole, 'hhole) enode ; context : context }
+
+(*type 'a cursor =
+  | Cursor : ('iprev, 'hprev, 'ihole, 'hhole) cursor -> ('iprev * 'hprev * 'ihole * 'hhole) cursor*)
+
+let empty context = { context ; trail = Top ; node = Just Null }
 
 let make_context ?pos ?(shared=false) ?(length=(-1)) fn =
   let fd = Unix.openfile fn [O_RDWR] 0o644 in
@@ -242,53 +292,27 @@ let make_context ?pos ?(shared=false) ?(length=(-1)) fn =
     roots_table = Hashtbl.create 1
   }
 
-
-let make_internal :
-  (not_indexed, not_hashed) node ->
-  ('ib, 'hb) node ->
-  Path.side -> (not_indexed, not_hashed) node =
-  fun fresh other fresh_side ->
-    match fresh_side with
-    | Left  -> View (
-        Internal (fresh, other, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any))
-    | Right -> View (
-        Internal (other, fresh, Right_Not_Indexed, Not_Hashed, Not_Indexed_Any))
-
 let load_node context index = ignore (context, index) ; failwith "not implemented"
 
-let rec string_of_tree : type i h . (i, h) node -> int -> string =
+let rec string_of_tree : type i h . (i, h) enode -> int -> string =
   fun root indent ->
     let indent_string = String.concat "" (List.init indent (fun _ -> " . ")) in
     match root with
-    | Null -> Printf.sprintf "%s Null\n" indent_string
-    | Disk index -> Printf.sprintf "%sDisk %Ld" indent_string index
-    | View (Leaf (value, _, _, _)) ->
-      Printf.sprintf "%sLeaf %s\n" indent_string (Value.to_string value)
-    | View (Bud  (node , _, _, _)) ->
-      Printf.sprintf "%sBud:\n%s" indent_string
-        (string_of_tree node (indent + 1))
-    | View (Internal (left, right, _, _, _)) ->
-      Printf.sprintf "%sInternal:\n%s%s" indent_string
-        (string_of_tree left (indent + 1))
-        (string_of_tree right (indent + 1))
-    | View (Extender (_, node, _, _, _)) ->
-      Printf.sprintf "%sExtender:\n%s" indent_string
-        (string_of_tree node (indent + 1))
-
-type trail =
-  | Top      : trail
-  | Left     : ('i, 'h) node * trail -> trail
-  | Right    : ('i, 'h) node * trail -> trail
-  | Budded   : trail
-  | Extended : Path.segment -> trail
-
-type untyped_node =
-  | Node : ('i, 'h) node -> untyped_node
-
-type cursor =
-  { trail : trail ; node : untyped_node ; context : context }
-
-let empty context = { context ; trail = Top ; node = Node Null }
+    | Just node -> begin
+        match node with
+        | Null -> Printf.sprintf "%s Null\n" indent_string
+        | Disk index -> Printf.sprintf "%sDisk %Ld" indent_string index
+        | View (Leaf (value, _, _, _)) ->
+          Printf.sprintf "%sLeaf %s\n" indent_string (Value.to_string value)
+        | View (Bud  (node , _, _, _)) ->
+          Printf.sprintf "%sBud:\n%s" indent_string (string_of_tree node (indent + 1))
+        | View (Internal (left, right, _, _, _)) ->
+          Printf.sprintf "%sInternal:\n%s%s" indent_string
+            (string_of_tree left (indent + 1))
+            (string_of_tree right (indent + 1))
+      end
+    | Extended (segment, node) ->
+      Printf.sprintf "%s[%s]- %s" indent_string (Path.to_string segment)                                               (string_of_tree (Just node) (indent + 1))
 
 let (>>=) y f = match y with
   | Ok x -> Ok (f x)
@@ -312,81 +336,94 @@ let open_context ~filename:_ = failwith "not implemented"
 let root _ _ = failwith "not implemented"
 
 
+module Utils : sig
+  val extend : Path.segment -> ('i, 'h) node -> ('i, 'h) enode
+
+end = struct
+
+  let extend : Path.segment -> ('i, 'h) node -> ('i, 'h) enode =
+    fun segment node -> match Path.cut segment with
+      | None   -> Just node
+      | Some _ -> Extended (segment, node)
+
+(*  let context cursor = match cursor with | Cursor c -> c.context
+
+    let node cursor = match cursor with | Cursor c -> c.node *)
+
+end
+
 (* todo, implement get / insert / upsert by using
    a function returning a zipper and then separate
    functions to do the edit *)
 
 
-let upsert : cursor ->
+
+let upsert : ('iprev, 'hprev, 'ihole, 'hhole) cursor ->
   Path.segment ->
   Value.t ->
-  (cursor, error) result =
+  (('iprev_, 'hprev_, 'ihole_, 'hhole_) cursor, string)  result =
 
   fun cursor segment value ->
 
-    let extend : Path.segment -> (not_indexed, not_hashed) node -> (not_indexed, not_hashed) node =
-      fun segment node -> match Path.cut segment with
-        | None   -> node
-        | Some _ -> View (Extender (segment, node, Not_Indexed, Not_Hashed, Not_Indexed_Any))
-    in
-
     let leaf = View (Leaf (value, Not_Indexed, Not_Hashed, Not_Indexed_Any)) in
-
-    let context = cursor.context in
+    let context = cursor.context  in
 
     let rec upsert_aux : type i h .
-      (i,h) node ->
+      (i, h) enode ->
       Path.segment ->
       Path.side ->
-      (('ib, 'hb) node, error) result =
+      (('ib, 'hb) enode, error) result =
 
-      fun node segment side ->
-        match (segment, node) with
+      fun enode segment side ->
+        match enode with
+        | Just node ->
+          begin
+            match (segment, node) with
+            | (_, Disk index) ->
+              upsert_aux (load_node context index) segment side
 
-        | (_, Disk index) ->
-          upsert_aux (load_node context index) segment side
+            (* If we encounter a node still on the disk, load it and retry. *)
 
-        (* If we encounter a node still on the disk, load it and retry. *)
+            | (_, Null) -> Ok (Utils.extend segment leaf)
 
-        | (_, Null) -> Ok (extend segment leaf)
+            | (segment, View view_node) -> begin
+                match view_node with
 
-        | (segment, View view_node) -> begin
-            match view_node with
+                | Internal (left, right, _, _, _) -> begin
+                    match Path.cut segment with
+                    | Some (Left, remaining_segment) ->
 
-            | Internal (left, right, _, _, _) -> begin
-                match Path.cut segment with
-                | Some (Left, remaining_segment) ->
-
-                  upsert_aux left remaining_segment Path.Left >>=
-                  fun new_left ->
-                  View (
-                    Internal (
-                      new_left, right,
-                      Left_Not_Indexed, Not_Hashed, Not_Indexed_Any))
-
-
-                | Some (Right, remaining_segment) ->
-                  upsert_aux right remaining_segment Path.Right >>=
-                  fun new_right ->
-                  View (
-                    Internal (
-                      left, new_right,
-                      Right_Not_Indexed, Not_Hashed, Not_Indexed_Any))
+                      upsert_aux left remaining_segment Path.Left >>=
+                      fun new_left ->
+                      Just (View (
+                        Internal (
+                          new_left, right,
+                          Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
 
 
-                | None -> assert false (* a segment can't end on an internal node, by construction *)
+                    | Some (Right, remaining_segment) ->
+                      upsert_aux right remaining_segment Path.Right >>=
+                      fun new_right ->
+                      Just (View (
+                        Internal (
+                          left, new_right,
+                          Right_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
+
+
+                    | None -> assert false (* a segment can't end on an internal node, by construction *)
+                  end
+
+                | Leaf (_, _, _, _) ->
+                  Ok (Just leaf) (* Upserting !!! *)
+
+                | Bud _ -> Error "tried to upsert a value into a bud"
               end
+          end
+        | Extended (extender_segment, node) ->
+          let (common_segment, remaining_segment, remaining_extender) =
+            Path.common_prefix segment extender_segment in begin
 
-            | Leaf (_, _, _, _) ->
-              Ok leaf (* Upserting !!! *)
-
-            | Bud _ -> Error "tried to upsert a value into a bud"
-
-            | Extender (extender_segment, node, _, _, _) ->
-              let (common_segment, remaining_segment, remaining_extender) =
-                Path.common_prefix segment extender_segment in begin
-
-                (* here's what can happen
+            (* here's what can happen
                    - common_prefix is empty : not a problem just create an internal node
                    and inject remaining_segment and remaining_extender right and left
                    (they must differ on the first bit if common_prefix is empty
@@ -398,61 +435,75 @@ let upsert : cursor ->
                    In general it would be useful to have an "extend" function which takes
                    a segment and a node and return just the node if the segment is empty
                    and an extender followed by the node otherwise
-                *)
+            *)
 
-                match (Path.cut remaining_segment, Path.cut remaining_extender) with
+            match (Path.cut remaining_segment, Path.cut remaining_extender) with
 
-                | (None, None) -> upsert_aux node Path.empty Path.dummy_side
-                (* we traveled the length of the extender *)
+            | (None, None) -> upsert_aux (Just node) Path.empty Path.dummy_side
+            (* we traveled the length of the extender *)
 
-                | (Some (Left, remaining_segment), Some (Right, remaining_extender)) -> begin
+            | (Some (Left, remaining_segment), Some (Right, remaining_extender)) -> begin
                     match Path.cut remaining_extender with
                     | None ->
-                      upsert_aux Null remaining_segment Path.Left >>=
+                      upsert_aux (Just Null) remaining_segment Path.Left >>=
                       fun new_left ->
-                      extend common_segment (View (
+                      Utils.extend common_segment (View (
                           Internal (
                             new_left,
-                            node,
+                            (Just node),
                             Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                     | Some _ ->
-                      upsert_aux Null remaining_segment Path.Left >>=
+                      upsert_aux (Just Null) remaining_segment Path.Left >>=
                       fun new_left ->
-                      extend common_segment (View (
+                      Utils.extend common_segment (View (
                           Internal (
                             new_left,
-                            View (Extender (remaining_extender, node, Not_Indexed, Not_Hashed, Not_Indexed_Any)),
+                            Extended (remaining_extender, node),
                             Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                   end
 
                 | (Some (Right, remaining_segment), Some (Left, remaining_extender)) -> begin
                     match Path.cut remaining_extender with
                     | None ->
-                      upsert_aux Null remaining_segment Path.Right >>=
+                      upsert_aux (Just Null) remaining_segment Path.Right >>=
                       fun new_right ->
-                      extend common_segment (View (
+                      Utils.extend common_segment (View (
                           Internal (
-                            node,
+                            Just node,
                             new_right,
                             Right_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                     | Some _ ->
-                      upsert_aux Null remaining_segment Path.Right >>=
+                      upsert_aux (Just Null) remaining_segment Path.Right >>=
                       fun new_right ->
-                      extend common_segment (View (
+                      Utils.extend common_segment (View (
                           Internal (
-                            View (Extender (remaining_extender, node, Not_Indexed, Not_Hashed, Not_Indexed_Any)),
+                            Extended (remaining_extender, node),
                             new_right,
                             Right_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                   end
-
                 | _ -> assert false
-              end
           end
     in
-    let Node node = cursor.node in
-    upsert_aux node segment Path.dummy_side >>=
-    fun node ->  {cursor with node = Node node}
+
+    upsert_aux cursor.node segment Path.dummy_side >>=
+    fun node ->
+      let trail = begin
+        match cursor.trail with
+        | Top -> Top
+        | Budded (Top, Indexed _, _, _) -> Budded(Top, Not_Indexed, Not_Hashed, Not_Indexed_Any)
+        | Budded (Left (trail, _, _, _), Indexed _, _, _) -> Budded(Top, Not_Indexed, Not_Hashed, Not_Indexed_Any)
+        | _ -> Top
+      end
+      in {cursor with node ; trail}
+
+
 
 let context =
   let fn = Filename.temp_file "plebeia" "test" in
   make_context ~shared:true ~length:1024 fn
+
+let cursor = empty context
+
+let x = upsert cursor Path.empty (Value.of_string "foo")
+
+let f trail right = Left (trail, right, All_Indexed 3L, Hashed (Bigstring.of_string "123"), Indexed_and_Hashed)
