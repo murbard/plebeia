@@ -214,58 +214,20 @@ and ('ia, 'ha) view =
    element on the "stack" using a product type. *)
 
 
-
-type modified
-type unmodified
-
-type ('ia, 'ha, 'ib, 'hb, 'ic, 'hc, 'modified) internal_modified_rule =
-  | Modified :  ('ia, 'ha, 'ib, 'hb, 'ic, 'hc, modified) internal_modified_rule
-  | Unmodified:
-      ('ia, 'ib, 'ic) internal_node_indexing_rule *
-      ('ha, 'hb, 'hc) hashed_is_transitive ->
-    ('ia, 'ha, 'ib, 'hb, 'ic, 'hc, unmodified) internal_modified_rule
-
-type ('ia, 'ha, 'ib, 'hb, 'modified) modified_rule =
-  | Modified : ('ia, 'ha, 'ib, 'hb, modified) modified_rule
-  | Unmodified_:
-      ('ia, 'ib) indexing_rule *
-      ('ha, 'ha, 'hc) hashed_is_transitive ->
-    ('ia, 'ha, 'ib, 'hb, unmodified) modified_rule
-
-
 (* TODO this trail might need to deal with extended node in a special way, but I'm not sure *)
-type ('itrail, 'htrail, 'modified) trail =
-  | Top      : ('itrail, 'htrail, 'modified) trail
+type ('iother, 'hother, 'ihole, 'hhole) trail =
+  | Top      : ('iother, 'hother, 'ihole, 'hhole) trail
   | Left     : (* we took the left branch of an internal node *)
-      ('iright, 'hright) node *
-      ('iprev_hole * 'iprev_trail,  'hprev_hole * 'hprev_trail, 'mod_pred) trail *
-      ('iprev_hole, 'hprev_hole, 'ihole, 'hhole, 'iright, 'hright, 'modified) internal_modified_rule *
-      ('iprev_hole, 'hprev_hole) indexed_implies_hashed
-    -> ('ihole * ('irprev_hole * 'iprev_trail),
-        'hhole * ('hprev_hole * 'hprev_trail),
-        'modified) trail
+      ('iright, 'hright, 'iprev_hole, 'hprev_hole) trail *
+      (('iright, 'hright) node)
+      -> ('iright, 'hright, 'ihole, 'hhole) trail
 
-  | Right     : (* we took the right branch of an internal node *)
-      ('iprev_hole * 'iprev_trail,  'hprev_hole * 'hprev_trail, 'mod_pred) trail *
-      ('ileft, 'hleft) node *
-      ('iprev_hole, 'hprev_hole, 'ileft, 'hleft, 'ihole, 'hhole, 'modified) internal_modified_rule *
-        ('iprev_hole, 'hprev_hole) indexed_implies_hashed
-    -> ('ihole * ('irprev_hole * 'iprev_trail),
-        'hhole * ('hprev_hole * 'hprev_trail),
-        'modified) trail
+  | Right   : (* we took the left branch of an internal node *)
+      (('ileft, 'hleft) node) *
+      ('ileft, 'hleft, 'iprev_hole, 'hprev_hole) trail
+      -> ('ileft, 'hleft, 'ihole, 'hhole) trail
 
-  | Budded   :
-      ('iprev_hole * 'iprev_trail, 'hprev_hole * 'hprev_trail, 'mod_pred) trail *
-      ('iprev_hole, 'hprev_hole, 'ihole, 'hhole, 'modified) modified_rule *
-      ('iprev_hole, 'hprev_hole) indexed_implies_hashed
-    -> ('ihole * ('irprev_hole * 'iprev_trail),
-        'hhole * ('hprev_hole * 'hprev_trail), 'modified) trail
-
-let modify_trail = function
-  | Top -> Top
-  | Budded (trail, _, iih) -> Budded (trail, Modified, iih)
-  | Left (node, trail, _, iih) -> Left (node, trail, Modified, iih)
-  | Right (trail, node, _, iih) -> Right (trail, node, Modified, iih)
+  | Budded  : ('iother, 'hother, 'ihole, 'hhole) trail
 
 type context =
   {
@@ -287,14 +249,15 @@ type context =
    that represents the program point in a function that modifies a tree. *)
 
 
-type ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor =
-  { trail : ('ihole * 'iprev, 'hhole * 'hprev, 'modified) trail ;
-    node :  ('ihole, 'hhole) enode ; context : context }
+type ('i, 'h) cursor =
+  Cursor :  { trail : ('iother, 'hother, 'i, 'h) trail ;
+              node :  ('i, 'h) enode ;
+              context : context } -> ('i, 'h) cursor
 
 (*type 'a cursor =
   | Cursor : ('iprev, 'hprev, 'ihole, 'hhole) cursor -> ('iprev * 'hprev * 'ihole * 'hhole) cursor*)
 
-let empty context = { context ; trail = Top ; node = Just Null }
+let empty context = Cursor {context ; trail = Top ; node = Just Null}
 
 let make_context ?pos ?(shared=false) ?(length=(-1)) fn =
   let fd = Unix.openfile fn [O_RDWR] 0o644 in
@@ -356,6 +319,8 @@ let root _ _ = failwith "not implemented"
 
 module Utils : sig
   val extend : Path.segment -> ('i, 'h) node -> ('i, 'h) enode
+  val context : ('i, 'h) cursor -> context
+  val enode    : ('i, 'h) cursor -> ('i, 'h) enode
 
 end = struct
 
@@ -364,9 +329,9 @@ end = struct
       | None   -> Just node
       | Some _ -> Extended (segment, node)
 
-(*  let context cursor = match cursor with | Cursor c -> c.context
+  let context (Cursor c) = c.context
 
-    let node cursor = match cursor with | Cursor c -> c.node *)
+  let enode (Cursor c) = c.node
 
 end
 
@@ -376,15 +341,15 @@ end
 
 
 
-let upsert :  ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor ->
+let upsert : ('i, 'h) cursor ->
   Path.segment ->
   Value.t ->
-  (('iprev_, 'hprev_, 'ihole_, 'hhole_, modified) cursor, string)  result =
+  ( ('i, 'h) cursor, string)  result =
 
   fun cursor segment value ->
 
     let leaf = View (Leaf (value, Not_Indexed, Not_Hashed, Not_Indexed_Any)) in
-    let context = cursor.context  in
+    let context = Utils.context cursor in
 
     let rec upsert_aux : type i h .
       (i, h) enode ->
@@ -503,9 +468,8 @@ let upsert :  ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor ->
           end
     in
 
-    upsert_aux cursor.node segment Path.dummy_side >>=
-    fun node -> let trail = modify_trail cursor.trail in
-    {cursor with node ; trail}
+    upsert_aux (Utils.enode cursor) segment Path.dummy_side >>=
+    fun node -> Cursor { trail=Top  ; node ; context }
 
 
 
@@ -516,3 +480,5 @@ let context =
 let cursor = empty context
 
 let x = upsert cursor Path.empty (Value.of_string "foo")
+
+(*let f trail right = Left (trail, right, All_Indexed 3L, Hashed (Bigstring.of_string "123"), Indexed_and_Hashed)*)
