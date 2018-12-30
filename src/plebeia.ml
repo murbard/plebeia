@@ -16,13 +16,15 @@ module Path : sig
       and 1 = true = Right *)
 
   val dummy_side : side
-
+  (** Whenever we need to consistently pick side that doesn't really correspond
+    to a real side. By convention, it is Left. *)
 
   type segment = private side list
   (** A segment is always just a list of sides. TODO: use bit arithmetic for
       speed and memory footprint.*)
 
   val empty : segment
+  (** The empty segment. *)
 
   val cut : segment -> (side * segment) option
   (** Cuts a path into a head and tail if not empty. *)
@@ -31,14 +33,15 @@ module Path : sig
   (** Factors a common prefix between two segments. *)
 
   val of_side_list : side list -> segment
+  (** Converts a list of side to a segment. *)
 
   val to_string : segment -> string
+  (** String representation of a segment, e.g. "LLLRLLRL" *)
 
 end = struct
   type side = Left | Right
   let dummy_side = Left
   type segment = side list (* FIXME: use bit arithmetic *)
-  type path = segment list
   let cut = function
     | [] -> None
     | h::t -> Some (h,t)
@@ -227,11 +230,10 @@ type ('ia, 'ha, 'ib, 'hb, 'ic, 'hc, 'modified) internal_modified_rule =
 
 type ('ia, 'ha, 'ib, 'hb, 'modified) modified_rule =
   | Modified : ('ia, 'ha, 'ib, 'hb, modified) modified_rule
-  | Unmodified_:
+  | Unmodified:
       ('ia, 'ib) indexing_rule *
-      ('ha, 'ha, 'hc) hashed_is_transitive ->
+      ('ha, 'hb, 'hb) hashed_is_transitive ->
     ('ia, 'ha, 'ib, 'hb, unmodified) modified_rule
-
 
 (* TODO this trail might need to deal with extended node in a special way, but I'm not sure *)
 type ('itrail, 'htrail, 'modified) trail =
@@ -261,11 +263,6 @@ type ('itrail, 'htrail, 'modified) trail =
     -> ('ihole * ('irprev_hole * 'iprev_trail),
         'hhole * ('hprev_hole * 'hprev_trail), 'modified) trail
 
-let modify_trail = function
-  | Top -> Top
-  | Budded (trail, _, iih) -> Budded (trail, Modified, iih)
-  | Left (node, trail, _, iih) -> Left (node, trail, Modified, iih)
-  | Right (trail, node, _, iih) -> Right (trail, node, Modified, iih)
 
 type context =
   {
@@ -287,14 +284,34 @@ type context =
    that represents the program point in a function that modifies a tree. *)
 
 
-type ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor =
-  { trail : ('ihole * 'iprev, 'hhole * 'hprev, 'modified) trail ;
-    node :  ('ihole, 'hhole) enode ; context : context }
+type unode =
+    Node : ('inode, 'hnode) enode -> unode
+
+type (* ('iprev, 'hprev, 'modified) *) cursor =
+    Cursor : ('ihole * 'iprev, 'hhole * 'hprev, 'modified) trail * ('ihole, 'hhole) enode *
+             context  -> cursor (* ('iprev, 'hprev, 'modified) cursor *)
+
+let load_node context index = ignore (context, index) ; failwith "not implemented"
+
+let below_bud : cursor ->  cursor =
+  function
+  | Cursor (Top, Just (View (Bud (
+      enode_below, indexing_rule,
+      hashed_is_transitive,
+      indexed_implies_hashed))), context)
+    ->
+    Cursor (
+      Budded (Top, Unmodified (indexing_rule, hashed_is_transitive), indexed_implies_hashed),
+      enode_below,
+      context)
+  | _ -> failwith "meh"
 
 (*type 'a cursor =
   | Cursor : ('iprev, 'hprev, 'ihole, 'hhole) cursor -> ('iprev * 'hprev * 'ihole * 'hhole) cursor*)
 
-let empty context = { context ; trail = Top ; node = Just Null }
+let bud = Bud (Just Null, Not_Indexed, Not_Hashed, Not_Indexed_Any)
+
+let empty context = Cursor (Top, Just (View bud), context)
 
 let make_context ?pos ?(shared=false) ?(length=(-1)) fn =
   let fd = Unix.openfile fn [O_RDWR] 0o644 in
@@ -310,7 +327,7 @@ let make_context ?pos ?(shared=false) ?(length=(-1)) fn =
     roots_table = Hashtbl.create 1
   }
 
-let load_node context index = ignore (context, index) ; failwith "not implemented"
+
 
 let rec string_of_tree : type i h . (i, h) enode -> int -> string =
   fun root indent ->
@@ -376,25 +393,24 @@ end
 
 
 
-let upsert :  ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor ->
+let upsert : cursor ->
   Path.segment ->
   Value.t ->
-  (('iprev_, 'hprev_, 'ihole_, 'hhole_, modified) cursor, string)  result =
+  (cursor, string)  result =
 
   fun cursor segment value ->
 
     let leaf = View (Leaf (value, Not_Indexed, Not_Hashed, Not_Indexed_Any)) in
-    let context = cursor.context  in
+    let Cursor (_, _, context) = cursor in
 
-    let rec upsert_aux : type i h .
-      (i, h) enode ->
+    let rec upsert_aux : unode->
       Path.segment ->
       Path.side ->
-      (('ib, 'hb) enode, error) result =
+      ((not_indexed, not_hashed) enode, error) result =
 
-      fun enode segment side ->
-        match enode with
-        | Just node ->
+      fun unode segment side ->
+        match unode with
+        | Node (Just node) ->
           begin
             match (segment, node) with
             | (_, Disk index) ->
@@ -402,7 +418,7 @@ let upsert :  ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor ->
 
             (* If we encounter a node still on the disk, load it and retry. *)
 
-            | (_, Null) -> Ok (Utils.extend segment leaf)
+            | (_, Null) -> Ok  (Utils.extend segment leaf)
 
             | (segment, View view_node) -> begin
                 match view_node with
@@ -411,16 +427,16 @@ let upsert :  ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor ->
                     match Path.cut segment with
                     | Some (Left, remaining_segment) ->
 
-                      upsert_aux left remaining_segment Path.Left >>=
-                      fun new_left ->
+                      upsert_aux (Node left) remaining_segment Path.Left >>=
+                      fun (new_left) ->
                       Just (View (
-                        Internal (
-                          new_left, right,
-                          Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
+                          Internal (
+                            new_left, right,
+                            Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
 
 
                     | Some (Right, remaining_segment) ->
-                      upsert_aux right remaining_segment Path.Right >>=
+                      upsert_aux (Node right) remaining_segment Path.Right >>=
                       fun new_right ->
                       Just (View (
                         Internal (
@@ -437,7 +453,7 @@ let upsert :  ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor ->
                 | Bud _ -> Error "tried to upsert a value into a bud"
               end
           end
-        | Extended (extender_segment, node) ->
+        | Node (Extended (extender_segment, node)) ->
           let (common_segment, remaining_segment, remaining_extender) =
             Path.common_prefix segment extender_segment in begin
 
@@ -457,13 +473,13 @@ let upsert :  ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor ->
 
             match (Path.cut remaining_segment, Path.cut remaining_extender) with
 
-            | (None, None) -> upsert_aux (Just node) Path.empty Path.dummy_side
+            | (None, None) -> upsert_aux (Node (Just node)) Path.empty Path.dummy_side
             (* we traveled the length of the extender *)
 
             | (Some (Left, remaining_segment), Some (Right, remaining_extender)) -> begin
                     match Path.cut remaining_extender with
                     | None ->
-                      upsert_aux (Just Null) remaining_segment Path.Left >>=
+                      upsert_aux (Node (Just Null)) remaining_segment Path.Left >>=
                       fun new_left ->
                       Utils.extend common_segment (View (
                           Internal (
@@ -471,7 +487,7 @@ let upsert :  ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor ->
                             (Just node),
                             Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                     | Some _ ->
-                      upsert_aux (Just Null) remaining_segment Path.Left >>=
+                      upsert_aux (Node (Just Null)) remaining_segment Path.Left >>=
                       fun new_left ->
                       Utils.extend common_segment (View (
                           Internal (
@@ -483,7 +499,7 @@ let upsert :  ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor ->
                 | (Some (Right, remaining_segment), Some (Left, remaining_extender)) -> begin
                     match Path.cut remaining_extender with
                     | None ->
-                      upsert_aux (Just Null) remaining_segment Path.Right >>=
+                      upsert_aux (Node (Just Null)) remaining_segment Path.Right >>=
                       fun new_right ->
                       Utils.extend common_segment (View (
                           Internal (
@@ -491,7 +507,7 @@ let upsert :  ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor ->
                             new_right,
                             Right_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                     | Some _ ->
-                      upsert_aux (Just Null) remaining_segment Path.Right >>=
+                      upsert_aux (Node (Just Null)) remaining_segment Path.Right >>=
                       fun new_right ->
                       Utils.extend common_segment (View (
                           Internal (
@@ -502,11 +518,18 @@ let upsert :  ('iprev, 'hprev, 'ihole, 'hhole, 'modified) cursor ->
                 | _ -> assert false
           end
     in
-
-    upsert_aux cursor.node segment Path.dummy_side >>=
-    fun node -> let trail = modify_trail cursor.trail in
-    {cursor with node ; trail}
-
+    let Cursor (trail, node, _) = cursor in
+    upsert_aux (Node node) segment Path.dummy_side >>=
+    fun node -> begin
+      match trail with
+      | Top -> Cursor (Top, node, context)
+      | Left (prev_trail, right, _, indexed_implies_hashed) ->
+        Cursor (Left (prev_trail, right, Modified, indexed_implies_hashed), node, context)
+      | Right (left, prev_trail, _, indexed_implies_hashed) ->
+        Cursor (Right (left, prev_trail, Modified, indexed_implies_hashed), node, context)
+      | Budded (prev_trail, _, indexed_implies_hashed) ->
+        Cursor (Budded (prev_trail, Modified, indexed_implies_hashed), node, context)
+    end
 
 
 let context =
