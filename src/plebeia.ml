@@ -489,8 +489,6 @@ end = struct
         Node node
       else
         Node (View (Extender (segment, node, Not_Indexed, Not_Hashed, Not_Indexed_Any)))
-
-
 end
 
 (* todo, implement get / insert / upsert by using
