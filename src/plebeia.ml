@@ -47,7 +47,8 @@ end = struct
     | h::t -> Some (h,t)
   let empty = []
 
-  let to_string s = String.concat "" (List.map (function Left -> "L" | Right -> "R") s)
+  let to_string s =
+    String.concat "" (List.map (function Left -> "L" | Right -> "R") s)
   let rec common_prefix seg1 seg2 = match (seg1, seg2) with
     | (h1 :: t1, h2 :: t2) ->
       if h1 = h2 then
@@ -247,7 +248,6 @@ type ('ia, 'ha, 'ib, 'hb, 'modified) modified_rule =
       ('ha, 'hb, 'hb) hashed_is_transitive ->
     ('ia, 'ha, 'ib, 'hb, unmodified) modified_rule
 
-(* TODO this trail might need to deal with extended node in a special way, but I'm not sure *)
 type ('itrail, 'htrail, 'etrail, 'modified) trail =
   | Top      : ('itrail, 'htrail, 'etrail, 'modified) trail
   | Left     : (* we took the left branch of an internal node *)
@@ -311,20 +311,13 @@ type context =
   {
     array : Bigstring.t ;
     (* mmaped array where the nodes are written and indexed. *)
-
     mutable length : int64 ;
     (* Current length of the node table. *)
-
     leaf_table  : KeyValueStore.t ;
     (* Hash table  mapping leaf hashes to their values. *)
-
     roots_table : (Bigstring.t, int64) Hashtbl.t
     (* Hash table mapping root hashes to indices in the array. *)
   }
-
-(* The cursor, also known as a zipper combines the information contained in a trail and
-   a subtree to represent an edit point within a tree. This is a functional data structure
-   that represents the program point in a function that modifies a tree. *)
 
 type ex_node = Node : ('i, 'h, 'e) node -> ex_node
 (* existential type for a node *)
@@ -332,16 +325,23 @@ type ex_node = Node : ('i, 'h, 'e) node -> ex_node
 type cursor =
     Cursor : ('ihole * 'iprev, 'hhole * 'hprev, 'ehole * 'eprev, 'modified) trail *
              ('ihole, 'hhole, 'ehole) node * context  -> cursor
-  (* Existential type for a cursor, enforces that the hole tags match between the trail and the
-       Node *)
+(* The cursor, also known as a zipper combines the information contained in a
+   trail and a subtree to represent an edit point within a tree. This is a
+   functional data structure that represents the program point in a function
+   that modifies a tree. We use an existential type that keeps the .mli sane
+   and enforces the most important: that the hole tags match between the trail
+   and the Node *)
 
 let (>>=) y f = match y with
   | Ok x -> Ok (f x)
   | Error e -> Error e
+(* Error monad operator. *)
 
 let load_node context index = ignore (context, index) ; failwith "not implemented"
+(* Read the node from context.array, parse it and create a view node with it. *)
 
 let rec below_bud cursor =
+  (* This function expects a cursor positionned on a bud and moves it one step below. *)
   match cursor with
   | Cursor (trail, node, context) ->
     begin
@@ -351,10 +351,13 @@ let rec below_bud cursor =
           match vnode with
           | Bud (None, _, _, _) -> Error "Nothing beneath this bud"
           | Bud (Some below, indexing_rule, hashed_is_transitive, indexed_implies_hashed) ->
-            Ok (Cursor(
-              Budded(trail, Unmodified (indexing_rule, hashed_is_transitive), indexed_implies_hashed),
-              below,
-              context))
+            Ok (
+              Cursor (
+                Budded (trail,
+                        Unmodified (indexing_rule, hashed_is_transitive),
+                        indexed_implies_hashed),
+                below,
+                context))
           | _ -> Error "Attempted to navigate below a bud, but got a different kind of node."
         end
     end
@@ -400,10 +403,11 @@ let rec subtree cursor segment =
                        indexing_rule,
                        hashed_is_transitive,
                        indexed_implies_hashed) ->
-            let _, remaining_extender, remaining_segment = Path.common_prefix extender segment in
+            let _, remaining_extender, remaining_segment =
+              Path.common_prefix extender segment in
             if remaining_extender = Path.empty then
               let new_trail =
-                Extended(trail, extender,
+                Extended (trail, extender,
                          Unmodified (
                            indexing_rule,
                            hashed_is_transitive),
@@ -414,15 +418,20 @@ let rec subtree cursor segment =
         end
     end
 
-let empty_bud = View (Bud (None, Not_Indexed, Not_Hashed, Not_Indexed_Any))
-
-let empty context = Cursor (Top, empty_bud, context)
+let empty context =
+  (* A bud with nothing underneath, i.e. an empty tree or an empty sub-tree. *)
+  let empty_bud = View (Bud (None, Not_Indexed, Not_Hashed, Not_Indexed_Any)) in
+  Cursor (Top, empty_bud, context)
 
 let make_context ?pos ?(shared=false) ?(length=(-1)) fn =
   let fd = Unix.openfile fn [O_RDWR] 0o644 in
   let array =
     (* length = -1 means that the size of [fn] determines the size of
-       [array]. *)
+       [array]. This is almost certainly NOT what we want. Rather the array
+       should be made x% bigger than the file (say x ~ 25%). When the array
+       is close to being full, the file should be closed and reopened with
+       a bigger length.
+    *) (* FIXME *)
     let open Bigarray in
     array1_of_genarray @@ Unix.map_file fd ?pos
       char c_layout shared [| length |] in
@@ -432,27 +441,6 @@ let make_context ?pos ?(shared=false) ?(length=(-1)) fn =
     roots_table = Hashtbl.create 1
   }
 
-let rec string_of_tree root indent =
-  let indent_string = String.concat "" (List.init indent (fun _ -> " . ")) in
-  let Node node = root in
-  match node with
-    | (Disk index) -> Printf.sprintf "%sDisk %Ld" indent_string index
-    | View (Leaf (value, _, _, _)) ->
-      Printf.sprintf "%sLeaf %s\n" indent_string (Value.to_string value)
-    | View (Bud  (node , _, _, _)) ->
-      let recursive =
-        match node with
-        | Some node -> (string_of_tree (Node node) (indent + 1))
-        | None     ->  "Empty"
-      in
-      Printf.sprintf "%sBud:\n%s" indent_string recursive
-    | View (Internal (left, right, _, _, _)) ->
-      Printf.sprintf "%sInternal:\n%s%s" indent_string
-        (string_of_tree (Node left) (indent + 1))
-        (string_of_tree (Node right) (indent + 1))
-    | View (Extender (segment, node, _, _, _)) ->
-      Printf.sprintf "%s[%s]- %s" indent_string (Path.to_string segment)
-        (string_of_tree (Node node) (indent + 1))
 
 type error = string
 type value = Value.t
@@ -505,7 +493,7 @@ let tag_extender : type e . ('i, 'h, e) view -> ('i, 'h) ex_extender_node =
 let upsert : cursor ->
   Path.segment ->
   Value.t ->
-  (cursor, string)  result =
+  (cursor, string) result =
 
   fun cursor segment value ->
 
@@ -522,16 +510,16 @@ let upsert : cursor ->
         | (_, Disk index) ->
           upsert_aux (load_node context index)  segment side
         (* If we encounter a node still on the disk, load it and retry. *)
-
         | (segment, View view_node) -> begin
             match view_node with
-
             | Internal (left, right, _, _, _) -> begin
                 let insert_new_node new_node = function
                   | Path.Left ->
-                    Not_Extender (View (Internal (new_node, right, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
+                    Not_Extender (View (Internal (
+                        new_node, right, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                   | Path.Right ->
-                    Not_Extender (View (Internal (left, new_node, Right_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
+                    Not_Extender (View (Internal (
+                        left, new_node, Right_Not_Indexed, Not_Hashed, Not_Indexed_Any)))
                 in match Path.cut segment with
                 | None -> Error "A segment ended on an internal node"
                 | Some (Left, remaining_segment) ->
@@ -540,51 +528,60 @@ let upsert : cursor ->
                     match new_left with
                     | Is_Extender new_left -> insert_new_node new_left Left
                     | Not_Extender new_left -> insert_new_node new_left Left
+                    (* this pattern feels silly, surely these is a better way *)
                   end
                 | Some (Right, remaining_segment) ->
                   upsert_aux (Node right) remaining_segment Path.Right >>=
                   function
                   | Is_Extender new_right -> insert_new_node new_right Right
                   | Not_Extender new_right -> insert_new_node new_right Right
+                  (* ditto *)
              end
-            | Leaf _ ->
-              Ok (Not_Extender leaf) (* Upserting !!! *)
-
+            | Leaf _ -> Ok (Not_Extender leaf) (* Upserting *)
             | Bud _ -> Error "Tried to upsert a value into a bud"
-
             | Extender (extender_segment, other_node, _, _, _) ->
+              (* This is the one that is trickier to handle. *)
               let (common_segment, remaining_segment, remaining_extender) =
                 Path.common_prefix segment extender_segment in begin
-
                 (* here's what can happen
-                       - common_prefix is empty : not a problem just create an internal node
-                       and inject remaining_segment and remaining_extender right and left
-                       (they must differ on the first bit if common_prefix is empty.
+                   - common_prefix is empty: that means remaining segment
+                     and remaining extender start with different directions.
+                     So, create an internal node and inject them on each side.
 
-                       - common_prefix is not empty : cut the extender to the common prefix,
-                       take the remaining_extender and create a second extender in succession
-                       then recursively insert with the remaining_segment at the new cross point.
+                   - common_prefix is not empty : cut the extender to the
+                      common prefix, take the remaining_extender and create a
+                      second extender in succession then recursively insert
+                      with the remaining_segment at the new cross point.
                 *)
-
                 match (Path.cut remaining_segment, Path.cut remaining_extender) with
 
                 | (_, None) -> upsert_aux (Node other_node) Path.empty Path.dummy_side
                 (* we traveled the length of the extender *)
+                | (None, Some _) ->
+                  Error "The segment is a prefix to some other path in the tree."
+                | (Some (my_dir, remaining_segment),
+                   Some (other_dir, remaining_extender)) ->
 
-                | (None, Some _) -> Error "not sure but this smells fishy"
-
-                | (Some (my_dir, remaining_segment), Some (other_dir, remaining_extender)) ->
                   let my_node =
                     if remaining_segment = Path.empty then
                       Not_Extender leaf
                     else
-                      Is_Extender (View (Extender (remaining_segment, leaf, Not_Indexed, Not_Hashed, Not_Indexed_Any)))
-                  in
-                  let other_node =
+                      Is_Extender
+                        (View (Extender
+                                 (remaining_segment, leaf,
+                                  Not_Indexed, Not_Hashed, Not_Indexed_Any)))
+                        (* wrap inside an extender existnetial time, this seems
+                           silly but I don't know a better way. *)
+                  and other_node =
                     if remaining_extender = Path.empty then
                       Node other_node
                     else
-                      Node (View (Extender (remaining_extender, other_node, Not_Indexed, Not_Hashed, Not_Indexed_Any)))
+                      Node
+                        (View (Extender
+                                 (remaining_extender, other_node,
+                                  Not_Indexed, Not_Hashed, Not_Indexed_Any)))
+                        (* This one we complextely wrap in a node existential
+                           type. *)
                   in
                   let Node other_node = other_node in
                   let internal = begin
@@ -592,13 +589,14 @@ let upsert : cursor ->
                       | Path.Left ->
                         Internal(n, other_node, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)
                       | Path.Right ->
-                        Internal(other_node, n, Right_Not_Indexed, Not_Hashed, Not_Indexed_Any) in
-                    match (my_dir, other_dir) with
+                        Internal(other_node, n, Right_Not_Indexed, Not_Hashed, Not_Indexed_Any)
+                    in match (my_dir, other_dir) with
                     | (Left, Right) ->
                       begin
                         match my_node with
                         | Not_Extender my_node -> insert_into_internal my_node Left
                         | Is_Extender my_node -> insert_into_internal my_node Left
+                        (* again, very silly *)
                       end
                     | (Right, Left) ->
                       begin
@@ -607,37 +605,57 @@ let upsert : cursor ->
                         | Is_Extender my_node -> insert_into_internal my_node Right
                       end
 
-                    | _ -> assert false (* if there is no common segment, they should differ? *)
+                    | _ -> assert false
                   end
                   in
-                  if common_segment = Path.empty then (Ok (Not_Extender (View (internal))))
+                  if common_segment = Path.empty then
+                    (Ok (Not_Extender (View (internal))))
                   else
-                    let e = Extender (
-                            common_segment,
-                            View internal,
-                            Not_Indexed, Not_Hashed, Not_Indexed_Any) in
-                    Ok (Is_Extender (View (e)))
+                    let e = Extender ( common_segment, View internal,
+                                       Not_Indexed, Not_Hashed, Not_Indexed_Any)
+                    in Ok (Is_Extender (View (e)))
               end
           end
     in
     let Cursor (trail, node, _) = cursor in
-    upsert_aux (Node node) segment Path.dummy_side >>=
-    fun node ->
-    let update_trail node =
-      match trail with
-      | Top -> Cursor (Top, node, context)
-      | Left (prev_trail, right, _, indexed_implies_hashed) ->
-        Cursor (Left (prev_trail, right, Modified, indexed_implies_hashed), node, context)
-      | Right (left, prev_trail, _, indexed_implies_hashed) ->
-        Cursor (Right (left, prev_trail, Modified, indexed_implies_hashed), node, context)
-      | Budded (prev_trail, _, indexed_implies_hashed) ->
-          Cursor (Budded (prev_trail, Modified, indexed_implies_hashed), node, context)
-      | Extended _ -> assert false
-    in match node with
-    | Is_Extender node -> update_trail node
-    | Not_Extender node -> update_trail node
+    match upsert_aux (Node node) segment Path.dummy_side with
+    | Error e -> Error e
+    | Ok node ->
+      let update_trail node =
+        match trail with
+        | Budded (prev_trail, _, indexed_implies_hashed) ->
+          Ok (Cursor (Budded (prev_trail, Modified, indexed_implies_hashed),
+                      node, context))
+        | _ -> Error "Must insert from a cursor positionned on a bud"
+      in match node with
+      | Is_Extender node -> update_trail node
+      | Not_Extender node -> update_trail node
 
 
+(* What follows is just for debugging purposes, to be removed. *)
+
+let rec string_of_tree root indent =
+  (* pretty prints a tree to a string *)
+  let indent_string = String.concat "" (List.init indent (fun _ -> " . ")) in
+  let Node node = root in
+  match node with
+    | (Disk index) -> Printf.sprintf "%sDisk %Ld" indent_string index
+    | View (Leaf (value, _, _, _)) ->
+      Printf.sprintf "%sLeaf %s\n" indent_string (Value.to_string value)
+    | View (Bud  (node , _, _, _)) ->
+      let recursive =
+        match node with
+        | Some node -> (string_of_tree (Node node) (indent + 1))
+        | None     ->  "Empty"
+      in
+      Printf.sprintf "%sBud:\n%s" indent_string recursive
+    | View (Internal (left, right, _, _, _)) ->
+      Printf.sprintf "%sInternal:\n%s%s" indent_string
+        (string_of_tree (Node left) (indent + 1))
+        (string_of_tree (Node right) (indent + 1))
+    | View (Extender (segment, node, _, _, _)) ->
+      Printf.sprintf "%s[%s]- %s" indent_string (Path.to_string segment)
+        (string_of_tree (Node node) (indent + 1))
 
 let context =
   let fn = Filename.temp_file "plebeia" "test" in
