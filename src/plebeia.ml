@@ -322,14 +322,10 @@ type ('i, 'h) ex_extender_node =
   | Not_Extender: ('i, 'h, not_extender) node -> ('i, 'h) ex_extender_node
   (* existential type hiding the extender tag *)
 
-
-
 type cursor =
     Cursor :   ('ihole * 'iprev, 'hhole * 'hprev, 'ehole * 'eprev, 'modified) trail
                * ('ihole, 'hhole, 'ehole) node
-  (* * ('inode, 'ihole, 'hnode, 'hhole, 'modified) modified_rule *)
                * context  -> cursor
-
 (* The cursor, also known as a zipper combines the information contained in a
    trail and a subtree to represent an edit point within a tree. This is a
    functional data structure that represents the program point in a function
@@ -350,7 +346,7 @@ let attach : type enode enode_prev . ('ihole * 'itrail, 'hhole * 'htrail, enode 
   -> context
   -> cursor =
   (* Attaches a node to a trail even if the indexing type and hashing type is incompatible with
-     the trail by tagging the modification. Extender types still have to match*)
+     the trail by tagging the modification. Extender types still have to match. *)
   fun trail node context ->
     match trail with
     | Top -> Cursor (Top, node, context)
@@ -378,7 +374,7 @@ let rec go_below_bud (Cursor (trail, node, context)) =
       end
 
 let rec go_side (Cursor (trail, node, context)) side =
-  (* Move the cursor down left or down right in the tree *)
+  (* Move the cursor down left or down right in the tree, assuming we are on an internal node. *)
   match node with
   | Disk i -> go_below_bud (Cursor (trail, (load_node i context), context))
   | View vnode -> begin
@@ -399,7 +395,7 @@ let rec go_side (Cursor (trail, node, context)) side =
     end
 
 let rec go_down_extender (Cursor (trail, node, context)) =
-  (* Move the cursor down an extender. *)
+  (* Move the cursor down the extender it points to. *)
   match node with
   | Disk i -> go_below_bud (Cursor (trail, (load_node i context), context))
   | View vnode -> begin
@@ -444,6 +440,7 @@ let rec go_up (Cursor (trail, node, context))  =
 
   | Left (prev_trail, right, Modified_Left, _) ->
     let internal = View (Internal (node, right, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any))
+
     in begin match prev_trail with
       | Top        ->  Ok (attach prev_trail internal context)
       | Left _     ->  Ok (attach prev_trail internal context)
@@ -488,6 +485,7 @@ let rec go_up (Cursor (trail, node, context))  =
 
 
 let rec subtree cursor segment =
+  (* returns the cursor for the subtree found by following the segment from the given cursor *)
   match go_below_bud cursor with
   | Error e -> Error e
   | Ok (Cursor (trail, node, context)) ->
@@ -566,7 +564,6 @@ let make_context ?pos ?(shared=false) ?(length=(-1)) fn =
     roots_table = Hashtbl.create 1
   }
 
-
 type error = string
 type value = Value.t
 type segment = Path.segment
@@ -583,8 +580,6 @@ let gc ~src:_ _ ~dest:_ = failwith "not implemented"
 let hash _ = failwith "not implemented"
 let open_context ~filename:_ = failwith "not implemented"
 let root _ _ = failwith "not implemented"
-
-
 
 
 module Utils : sig
