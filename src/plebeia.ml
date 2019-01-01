@@ -371,7 +371,7 @@ let rec go_below_bud (Cursor (trail, node, context)) =
         | _ -> Error "Attempted to navigate below a bud, but got a different kind of node."
       end
 
-let rec go_side (Cursor (trail, node, context)) side =
+let rec go_side side (Cursor (trail, node, context)) =
   (* Move the cursor down left or down right in the tree, assuming we are on an internal node. *)
   match node with
   | Disk i -> go_below_bud (Cursor (trail, (load_node i context), context))
@@ -706,8 +706,7 @@ let upsert : cursor ->
        something underneath. *)
     match cursor with
     | Cursor (trail, View (Bud (None, _, _, _)), context) ->
-      (* If we're inserting from a bud that is empty below,
-           create the node directly. *)
+      (* If we're inserting from a bud that is empty below, create the node directly. *)
       if segment = Path.empty then
         Error "Can't insert under a bud with an empty path"
       else
@@ -754,6 +753,16 @@ let context =
   let fn = Filename.temp_file "plebeia" "test" in
   make_context ~shared:true ~length:1024 fn
 
+let (|>>=) x f = match x with
+  | Error e -> Error e
+  | Ok x -> f x
+
+
 let cursor = empty context
 
-let x = upsert cursor (Path.of_side_list [Path.Left; Path.Right]) (Value.of_string "foo")
+
+let foo =
+  upsert cursor (Path.of_side_list [Path.Left; Path.Right]) (Value.of_string "foo") |>>=
+  fun cursor -> (upsert cursor (Path.of_side_list [Path.Left; Path.Left]) (Value.of_string "foo"))
+  |>>= go_below_bud |>>= go_down_extender |>>= (go_side Path.Left) |>>= go_up
+  |>>= (go_side Path.Right) |>>= go_up |>>= go_up |>>= go_up
