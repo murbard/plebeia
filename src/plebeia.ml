@@ -341,23 +341,21 @@ let (>>=) y f = match y with
 let load_node context index = ignore (context, index) ; failwith "not implemented"
 (* Read the node from context.array, parse it and create a view node with it. *)
 
-let attach : type enode enode_prev . ('ihole * 'itrail, 'hhole * 'htrail, enode * (enode_prev * 'etrail), 'modified) trail
-  -> ('inode, 'hnode, enode) node
-  -> context
-  -> cursor =
+let attach (type itrail htrail ehole etrail ) (trail:(itrail, htrail, ehole * etrail, 'm) trail)
+    (node:('i, 'h, ehole) node) context =
   (* Attaches a node to a trail even if the indexing type and hashing type is incompatible with
      the trail by tagging the modification. Extender types still have to match. *)
-  fun trail node context ->
-    match trail with
-    | Top -> Cursor (Top, node, context)
-    | Left (prev_trail, right, _, indexed_implies_hashed) ->
-      Cursor (Left (prev_trail, right, Modified_Left, indexed_implies_hashed), node, context)
-    | Right (left, prev_trail, _, indexed_implies_hashed) ->
-      Cursor (Right (left, prev_trail, Modified_Right, indexed_implies_hashed), node, context)
-    | Budded (prev_trail, _, indexed_implies_hashed) ->
-      Cursor (Budded (prev_trail, Modified_Left, indexed_implies_hashed), node, context)
-    | Extended (prev_trail, segment, _, indexed_implies_hashed) ->
-      Cursor (Extended (prev_trail, segment, Modified_Left, indexed_implies_hashed), node, context)
+  match trail with
+  | Top -> Cursor (Top, node, context)
+  | Left (prev_trail, right, _, indexed_implies_hashed) ->
+    Cursor (Left (prev_trail, right, Modified_Left, indexed_implies_hashed), node, context)
+  | Right (left, prev_trail, _, indexed_implies_hashed) ->
+    Cursor (Right (left, prev_trail, Modified_Right, indexed_implies_hashed), node, context)
+  | Budded (prev_trail, _, indexed_implies_hashed) ->
+    Cursor (Budded (prev_trail, Modified_Left, indexed_implies_hashed), node, context)
+  | Extended (prev_trail, segment, _, indexed_implies_hashed) ->
+    Cursor (Extended (prev_trail, segment, Modified_Left, indexed_implies_hashed), node, context)
+
 
 let rec go_below_bud (Cursor (trail, node, context)) =
   (* This function expects a cursor positionned on a bud and moves it one step below. *)
@@ -412,76 +410,45 @@ let rec go_up (Cursor (trail, node, context))  =
   | Top -> Error "cannot go above top"
   | Left (prev_trail, right,
           Unmodified (indexing_rule, hashed_is_transitive), indexed_implies_hashed) ->
-    Ok (Cursor (prev_trail, View (
-        Internal (node, right, indexing_rule, hashed_is_transitive, indexed_implies_hashed)),
-                context))
+    let new_node =
+      View (Internal (node, right, indexing_rule, hashed_is_transitive, indexed_implies_hashed))
+    in Ok (Cursor (prev_trail, new_node, context))
 
   | Right (left, prev_trail,
            Unmodified (indexing_rule, hashed_is_transitive), indexed_implies_hashed) ->
-    Ok (Cursor (prev_trail, View (
-        Internal (left, node, indexing_rule, hashed_is_transitive, indexed_implies_hashed)),
-                context))
+    let new_node =
+      View (Internal (left, node, indexing_rule, hashed_is_transitive, indexed_implies_hashed))
+    in Ok (Cursor (prev_trail, new_node, context))
 
   | Budded (prev_trail,
             Unmodified (indexing_rule, hashed_is_transitive), indexed_implies_hashed) ->
-    Ok (Cursor (prev_trail, View (
-        Bud (Some node, indexing_rule, hashed_is_transitive, indexed_implies_hashed)),
-                context))
+    let new_node =
+      View (Bud (Some node, indexing_rule, hashed_is_transitive, indexed_implies_hashed))
+    in Ok (Cursor (prev_trail, new_node, context))
 
   | Extended (prev_trail, segment,
               Unmodified (indexing_rule, hashed_is_transitive), indexed_implies_hashed) ->
-    Ok (Cursor (prev_trail, View (
-        Extender (segment, node, indexing_rule, hashed_is_transitive, indexed_implies_hashed)),
-                context))
+    let new_node =
+      View ( Extender (segment, node, indexing_rule, hashed_is_transitive, indexed_implies_hashed))
+    in Ok (Cursor (prev_trail, new_node, context))
 
-  (* Modified cases, the code is very repetitive, all because of the handling of extender,
-     I'm not sure how to make it more concise. Essentially, this is doing what "attach" is
-     supposed to do, but it won't attach because the types are weird *)
+  (* Modified cases. *)
 
   | Left (prev_trail, right, Modified_Left, _) ->
     let internal = View (Internal (node, right, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any))
-
-    in begin match prev_trail with
-      | Top        ->  Ok (attach prev_trail internal context)
-      | Left _     ->  Ok (attach prev_trail internal context)
-      | Right _    ->  Ok (attach prev_trail internal context)
-      | Budded _   ->  Ok (attach prev_trail internal context)
-      | Extended _ ->  Ok (attach prev_trail internal context)
-      (* this is really silly *)
-    end
+    in Ok (attach prev_trail internal context)
 
   | Right (left, prev_trail, Modified_Right, _) ->
     let internal = View (Internal (left, node, Right_Not_Indexed, Not_Hashed, Not_Indexed_Any))
-    in begin match prev_trail with
-      | Top        ->  Ok (attach prev_trail internal context)
-      | Left _     ->  Ok (attach prev_trail internal context)
-      | Right _    ->  Ok (attach prev_trail internal context)
-      | Budded _   ->  Ok (attach prev_trail internal context)
-      | Extended _ ->  Ok (attach prev_trail internal context)
-      (* this is really silly *)
-    end
+    in Ok (attach prev_trail internal context)
 
   | Budded (prev_trail, Modified_Left, _) ->
     let bud = View ( Bud (Some node, Not_Indexed, Not_Hashed, Not_Indexed_Any))
-    in begin match prev_trail with
-      | Top        ->  Ok (attach prev_trail bud context)
-      | Left _     ->  Ok (attach prev_trail bud context)
-      | Right _    ->  Ok (attach prev_trail bud context)
-      | Budded _   ->  Ok (attach prev_trail bud context)
-      | Extended _ ->  Ok (attach prev_trail bud context)
-      (* this is really silly *)
-    end
+    in Ok (attach prev_trail bud context)
 
   | Extended (prev_trail, segment, Modified_Left, _) ->
     let extender =  View ( Extender (segment, node, Not_Indexed, Not_Hashed, Not_Indexed_Any))
-    in begin match prev_trail with
-      | Top        ->  Ok (attach prev_trail extender context)
-      | Left _     ->  Ok (attach prev_trail extender context)
-      | Right _    ->  Ok (attach prev_trail extender context)
-      | Budded _   ->  Ok (attach prev_trail extender context)
-      (* this is really silly, notice that the typechecker is smart enough to know
-         that extender is not an option*)
-    end
+    in Ok (attach prev_trail extender context)
 
 
 let rec subtree cursor segment =
