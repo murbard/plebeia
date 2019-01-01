@@ -704,44 +704,26 @@ let upsert : cursor ->
     (* When we insert, we expect the cursor to be above a bud, but
        we first have to must past it. However, that's only if there is
        something underneath. *)
-
-    let node_after_upsert =
-      match cursor with
-      | Cursor (_, View (Bud (None, _, _, _)), _) ->
-        (* If we're inserting from a bud that is empty below,
+    match cursor with
+    | Cursor (trail, View (Bud (None, _, _, _)), context) ->
+      (* If we're inserting from a bud that is empty below,
            create the node directly. *)
-        if segment = Path.empty then
-          Ok (Not_Extender leaf)
-        else
-          Ok (Is_Extender (View (Extender (
-              segment, leaf, Not_Indexed, Not_Hashed, Not_Indexed_Any))))
-      | _ -> begin
-          match go_below_bud cursor with
-          | Error e -> Error e
-          | Ok (Cursor (_, node, _)) ->
-            upsert_aux (Node node) segment Path.dummy_side
-            (* Otherwise, recursively upsert using the auxiliary function *)
-        end
-    in
-
-    match node_after_upsert with
-    | Error e -> Error e
-    | Ok node_after_upsert ->
-      match Cursor with
-      | Cursor (_, View (Bud (None, _, _, _)), _) ->
-
-
-      let Cursor (trail, _, _) = cursor in
-      let update_trail node =
-        match trail with
-        | Budded (prev_trail, _, indexed_implies_hashed) ->
-          Ok (Cursor (Budded (prev_trail, Modified, indexed_implies_hashed),
-                      node, context))
-        | _ -> Error "Must insert from a cursor positionned on a bud"
-      in match resulting_node with
-      | Is_Extender node -> update_trail node
-      | Not_Extender node -> update_trail node
-
+      if segment = Path.empty then
+        Error "Can't insert under a bud with an empty path"
+      else
+        let result =   View (Extender (segment, leaf, Not_Indexed, Not_Hashed, Not_Indexed_Any)) in
+        Ok (attach trail (View (Bud (
+            Some result, Not_Indexed, Not_Hashed, Not_Indexed_Any))) context)
+    | Cursor (trail, View (Bud (Some insertion_point, _, _, _)), context) ->
+      let result = upsert_aux (Node insertion_point) segment Path.Left in begin
+      match result with
+      | Error e -> Error e
+      | Ok (Is_Extender result) ->
+        Ok (attach trail (View (Bud (Some result, Not_Indexed, Not_Hashed, Not_Indexed_Any))) context)
+      | Ok (Not_Extender result) ->
+        Ok (attach trail (View (Bud (Some result, Not_Indexed, Not_Hashed, Not_Indexed_Any))) context)
+    end
+    | _ -> Error "Must insert from a bud"
 
 (* What follows is just for debugging purposes, to be removed. *)
 
@@ -774,4 +756,4 @@ let context =
 
 let cursor = empty context
 
-let x = upsert cursor Path.empty (Value.of_string "foo")
+let x = upsert cursor (Path.of_side_list [Path.Left; Path.Right]) (Value.of_string "foo")
