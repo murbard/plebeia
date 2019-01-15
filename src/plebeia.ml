@@ -38,6 +38,8 @@ module Path : sig
   val to_string : segment -> string
   (** String representation of a segment, e.g. "LLLRLLRL" *)
 
+  val (@) : segment -> segment -> segment
+
 end = struct
   type side = Left | Right
   let dummy_side = Left
@@ -47,6 +49,7 @@ end = struct
     | h::t -> Some (h,t)
   let empty = []
 
+  let (@) = (@)
   let to_string s =
     String.concat "" (List.map (function Left -> "L" | Right -> "R") s)
   let rec common_prefix seg1 seg2 = match (seg1, seg2) with
@@ -224,10 +227,6 @@ and ('ia, 'ha, 'ea) view =
    Constructing these trails from closure would be easier, but it would make it harder
    to port the code to C. The type parameters of the trail keep track of the type of each
    element on the "stack" using a product type. *)
-(* A trail represents the content of the memory stack when recursively exploring a tree.
-   Constructing these trails from closure would be easier, but it would make it harder
-   to port the code to C. The type parameters of the trail keep track of the type of each
-   element on the "stack" using a product type. *)
 type modified
 type unmodified
 
@@ -338,13 +337,13 @@ let (>>=) y f = match y with
   | Error e -> Error e
 (* Error monad operator. *)
 
-let load_node (type e) context index (ewit:e extender_witness) : (indexed,hashed,e) node =
+let load_node (type e) context index (ewit:e extender_witness) : (indexed,hashed,e) view =
   match ewit with
   | Maybe_Extender  -> ignore (context, index) ; failwith "not implemented"
   | Not_Extender -> ignore (context, index) ; failwith "not implemented"
 (* Read the node from context.array, parse it and create a view node with it. *)
 
-let attach (type itrail htrail ehole etrail ) (trail:(itrail, htrail, ehole * etrail, 'm) trail)
+let attach (type itrail htrail ehole etrail) (trail:(itrail, htrail, ehole * etrail, 'm) trail)
     (node:('i, 'h, ehole) node) context =
   (* Attaches a node to a trail even if the indexing type and hashing type is incompatible with
      the trail by tagging the modification. Extender types still have to match. *)
@@ -363,7 +362,7 @@ let attach (type itrail htrail ehole etrail ) (trail:(itrail, htrail, ehole * et
 let rec go_below_bud (Cursor (trail, node, context)) =
   (* This function expects a cursor positionned on a bud and moves it one step below. *)
   match node with
-  | Disk (i, wit) -> go_below_bud (Cursor (trail, load_node i context wit, context))
+  | Disk (i, wit) -> go_below_bud (Cursor (trail, View (load_node i context wit), context))
 
   | View vnode -> begin
         match vnode with
@@ -378,7 +377,7 @@ let rec go_below_bud (Cursor (trail, node, context)) =
 let rec go_side side (Cursor (trail, node, context)) =
   (* Move the cursor down left or down right in the tree, assuming we are on an internal node. *)
   match node with
-  | Disk (i, wit) -> go_below_bud (Cursor (trail, (load_node i context wit), context))
+  | Disk (i, wit) -> go_below_bud (Cursor (trail, View (load_node i context wit), context))
   | View vnode -> begin
       match vnode with
       | Internal (left, right, indexing_rule, hashed_is_transitive, indexed_implies_hashed) ->
@@ -399,7 +398,7 @@ let rec go_side side (Cursor (trail, node, context)) =
 let rec go_down_extender (Cursor (trail, node, context)) =
   (* Move the cursor down the extender it points to. *)
   match node with
-  | Disk (i, wit) -> go_below_bud (Cursor (trail, (load_node i context wit), context))
+  | Disk (i, wit) -> go_below_bud (Cursor (trail, View (load_node i context wit), context))
   | View vnode -> begin
       match vnode with
       | Extender (segment, below, indexing_rule, hashed_is_transitive, indexed_implies_hashed) ->
@@ -462,7 +461,7 @@ let rec subtree cursor segment =
   | Ok (Cursor (trail, node, context)) ->
     begin
       match node with
-      | Disk (i, wit) -> subtree (Cursor (trail, (load_node i context wit), context)) segment
+      | Disk (i, wit) -> subtree (Cursor (trail, View (load_node i context wit), context)) segment
       | View vnode -> begin
           match vnode with
           | Leaf _ -> Error "Reached a leaf."
@@ -592,7 +591,7 @@ let alter cursor segment alteration =
       fun (Node node) segment side ->
         match (segment, node) with
         | (_, Disk (index, wit)) ->
-              alter_aux (Node (load_node context index wit))  segment side
+              alter_aux (Node (View (load_node context index wit)))  segment side
         (* If we encounter a node still on the disk, load it and retry. *)
         | (segment, View view_node) -> begin
             match view_node with
@@ -747,7 +746,7 @@ let delete cursor segment =
   let Cursor (trail, node, context) = cursor in
   let rec delete_aux (Node node) segment : ((not_indexed, not_hashed) ex_extender_node option, string) result =
     match (node) with
-    | Disk (i, wit) -> delete_aux (Node (load_node i context wit)) segment
+    | Disk (i, wit) -> delete_aux (Node (View (load_node i context wit))) segment
     | View vnode -> begin
         match vnode with
         | Leaf _ ->
@@ -755,42 +754,70 @@ let delete cursor segment =
             Ok None
           else
             Error "reached leaf before end of segment"
+        | Bud _ ->  Error "reached a bud and not a leaf"
         | Internal (left, right, _, _, _) -> begin
             match Path.cut segment with
             | None -> Error "didn't reach a leaf"
             | Some (Left, rest_of_segment) -> begin
+                let new_node new_left right =
+                  Ok (Some ( Not_Extender (View (Internal (
+                      new_left, right, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))))
+                in
                 match delete_aux (Node left) rest_of_segment with
                 | Error e -> Error e
                 | Ok None -> begin
-                    match right with
-                    | Disk  _ -> failwith "not implemented"
-                    | View (Extender _) -> failwith "todo: merge the two extenders"
-                    | View (Internal _) ->  Ok (Some (Is_Extender (View (
-                        Extender ((Path.of_side_list [Path.Right]), right, Not_Indexed,
-                                  Not_Hashed, Not_Indexed_Any)))))
-                    | View (Bud _) ->   Ok (Some (Is_Extender (View (
-                        Extender ((Path.of_side_list [Path.Right]), right, Not_Indexed,
-                                  Not_Hashed, Not_Indexed_Any)))))
-                    | View (Leaf _) ->  Ok (Some (Is_Extender (View (
-                        Extender ((Path.of_side_list [Path.Right]), right, Not_Indexed,
-                                  Not_Hashed, Not_Indexed_Any)))))
+                    let extend ?(segafter=Path.empty) right =
+                      Ok (Some (Is_Extender (View (
+                          Extender (Path.((of_side_list [Right]) @ segafter),
+                                    right, Not_Indexed, Not_Hashed, Not_Indexed_Any)))))
+                    in match right with
+                    | Disk (index, wit) -> begin
+                        match (load_node index context wit) with
+                        | Extender (segment, node, _, _, _) -> extend ~segafter:segment (node)
+                        | Internal _ as right -> extend (View right)
+                        | Bud _ as right -> extend (View right)
+                        | Leaf _ as right -> extend (View right)
+                      end
+                    | View (Extender (segment, node, _, _, _)) -> extend ~segafter:segment (node)
+                    | View (Internal _) -> extend right
+                    | View (Bud _)      -> extend right
+                    | View (Leaf _)     -> extend right
                   end
-                | Ok (Some  (Is_Extender new_left))->
-                  Ok (Some ( Not_Extender (View (
-                      Internal (new_left, right, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))))
-                | Ok (Some  (Not_Extender new_left))->
-                  Ok (Some ( Not_Extender (View (
-                      Internal (new_left, right, Left_Not_Indexed, Not_Hashed, Not_Indexed_Any)))))
+                | Ok (Some  (Is_Extender new_left))-> new_node new_left right
+                | Ok (Some  (Not_Extender new_left))-> new_node new_left right
               end
             | Some (Right, rest_of_segment) -> begin
-                failwith "not implemented"
+                let new_node left new_right =
+                  Ok (Some ( Not_Extender (View (Internal (
+                      left, new_right, Right_Not_Indexed, Not_Hashed, Not_Indexed_Any)))))
+                in match delete_aux (Node right) rest_of_segment with
+                | Error e -> Error e
+                | Ok None -> begin
+                    let extend left =
+                      Ok (Some (Is_Extender (View (
+                          Extender ((Path.of_side_list [Path.Left]),
+                                    left, Not_Indexed, Not_Hashed, Not_Indexed_Any)))))
+                    in match left with
+                    | Disk (index, wit) -> begin
+                        match (load_node index context wit) with
+                        | Extender _ -> failwith "todo: merge the two extenders"
+                        | Internal _ as right -> extend (View right)
+                        | Bud _ as right -> extend (View right)
+                        | Leaf _ as right -> extend (View right)
+                      end
+                    | View (Extender _) -> failwith "todo: merge the two extenders"
+                    | View (Internal _) -> extend left
+                    | View (Bud _) -> extend left
+                    | View (Leaf _) -> extend left
+                  end
+                | Ok (Some (Is_Extender new_right)) -> new_node left new_right
+                | Ok (Some  (Not_Extender new_right))-> new_node left new_right
+
               end
           end
-        | _ -> failwith "not implement yet"
+        | Extender _ -> failwith "not implement yet"
       end
   in ignore ((segment,delete_aux)) ; failwith "not finished"
-
-
 
 
 

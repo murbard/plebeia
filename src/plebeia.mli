@@ -53,10 +53,6 @@ val insert: cursor -> segment -> value -> (cursor, error) result
 (** Inserts a value at the given segment in the current tree.
     Returns the new cursor if successful. *)
 
-val update: cursor -> segment -> value -> cursor
-(** Updates a value at the given segment in the current tree.
-    Returns the new cursor if successful. *)
-
 val upsert: cursor -> segment -> value -> (cursor, error) result
 (** Upserts. This can still fail if the segment leads to a subtree. *)
 
