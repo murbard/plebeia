@@ -42,6 +42,9 @@ val subtree : cursor -> segment -> (cursor, error) result
 (** Moves the cursor down a segment, to the root of a sub-tree. Think
     "cd segment/" *)
 
+val create_subtree: cursor -> segment -> (cursor, error) result
+(** Create a subtree (bud). Think "mkdir segment" *)
+
 val parent : cursor -> cursor
 (** Moves the cursor back to the parent tree. Think "cd .." *)
 
@@ -55,6 +58,10 @@ val insert: cursor -> segment -> value -> (cursor, error) result
 
 val upsert: cursor -> segment -> value -> (cursor, error) result
 (** Upserts. This can still fail if the segment leads to a subtree. *)
+
+val delete: cursor -> segment -> (cursor, error) result
+(** Delete a leaf or subtree. *)
+
 
 val snapshot: cursor -> segment -> segment -> (cursor, error) result
 (** Snapshots a subtree at segment and place a soft link to it at

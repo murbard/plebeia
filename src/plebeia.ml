@@ -543,6 +543,8 @@ let commit _ = failwith "not implemented"
 let snapshot _ _ _ = failwith "not implemented"
 let update _ _ _ = failwith "not implemented"
 let get _ _ = failwith "not implemented"
+let delete _ _ = failwith "not implemented"
+let create_subtree _ _ = failwith "not implemented"
 let parent _ = failwith "not implemented"
 let subtree _ _ = failwith "not implemented"
 let gc ~src:_ _ ~dest:_ = failwith "not implemented"
@@ -755,6 +757,20 @@ let delete cursor segment =
           else
             Error "reached leaf before end of segment"
         | Bud _ ->  Error "reached a bud and not a leaf"
+        | Extender (other_segment, node, _, _, _) ->
+          (* If I don't go fully down that segment, that's an error *)
+          let _, rest, rest_other = Path.common_prefix other_segment segment in
+          if rest_other = Path.empty then begin
+            match (delete_aux (Node node) rest) with
+            | Error e -> Error e
+            | Ok None -> Ok None
+            | Ok (Some (Not_Extender node)) -> Ok (Some (Is_Extender (View (
+                Extender(other_segment, node, Not_Indexed, Not_Hashed, Not_Indexed_Any)))))
+            | Ok (Some (Is_Extender (View (Extender (next_segment, node, _, _, _))))) ->
+              ignore (next_segment,  node) ;failwith "not implemented"
+          end else
+            Error "no leaf at this location"
+
         | Internal (left, right, _, _, _) -> begin
             match Path.cut segment with
             | None -> Error "didn't reach a leaf"
@@ -793,19 +809,19 @@ let delete cursor segment =
                 in match delete_aux (Node right) rest_of_segment with
                 | Error e -> Error e
                 | Ok None -> begin
-                    let extend left =
+                    let extend ?(segafter=Path.empty) left =
                       Ok (Some (Is_Extender (View (
-                          Extender ((Path.of_side_list [Path.Left]),
+                          Extender (Path.((of_side_list [Right]) @ segafter),
                                     left, Not_Indexed, Not_Hashed, Not_Indexed_Any)))))
                     in match left with
                     | Disk (index, wit) -> begin
                         match (load_node index context wit) with
-                        | Extender _ -> failwith "todo: merge the two extenders"
+                        | Extender (segment, node, _, _, _) -> extend ~segafter:segment (node)
                         | Internal _ as right -> extend (View right)
                         | Bud _ as right -> extend (View right)
                         | Leaf _ as right -> extend (View right)
                       end
-                    | View (Extender _) -> failwith "todo: merge the two extenders"
+                    | View (Extender (segment, node, _, _, _)) -> extend ~segafter:segment (node)
                     | View (Internal _) -> extend left
                     | View (Bud _) -> extend left
                     | View (Leaf _) -> extend left
@@ -815,7 +831,6 @@ let delete cursor segment =
 
               end
           end
-        | Extender _ -> failwith "not implement yet"
       end
   in ignore ((segment,delete_aux)) ; failwith "not finished"
 
