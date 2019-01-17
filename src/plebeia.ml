@@ -65,6 +65,11 @@ end = struct
   let of_side_list l = l
 end
 
+let sha224 s =
+  let ret = Bytes.create 28 in
+  let digest = Nocrypto.Hash.SHA256.digest (Cstruct.of_string s) in
+  Cstruct.blit_to_bytes digest 0 ret 0 28 ; Bytes.to_string ret
+
 module Value : sig
   (** Module encapsulating the values inserted in the Patricia tree. *)
 
@@ -77,6 +82,8 @@ module Value : sig
   val hash : t -> hash
   (** Returns the hash of a value. *)
 
+  val big_string_of_hash : hash -> Bigstring.t
+
   val of_string : string -> t
 
   val to_string : t -> string
@@ -84,9 +91,10 @@ module Value : sig
 end = struct
   type t = string
   type hash = string
-  let hash value = ignore value; failwith "not implemented"
+  let hash value = sha224 value
   let of_string s = s
   let to_string s = s
+  let big_string_of_hash h = Bigstring.of_string h
 end
 
 
@@ -135,10 +143,9 @@ end
 
 type indexed type not_indexed
 type hashed type not_hashed
-type extender type not_extender type maybe_extender
+type extender type not_extender
 
 (* /!\ Beware, GADT festivities below. *)
-
 
 type ('ia, 'ha) indexed_implies_hashed =
   | Indexed_and_Hashed : (indexed, hashed) indexed_implies_hashed
@@ -377,7 +384,7 @@ let rec go_below_bud (Cursor (trail, node, context)) =
 let rec go_side side (Cursor (trail, node, context)) =
   (* Move the cursor down left or down right in the tree, assuming we are on an internal node. *)
   match node with
-  | Disk (i, wit) -> go_below_bud (Cursor (trail, View (load_node i context wit), context))
+  | Disk (i, wit) -> go_side side (Cursor (trail, View (load_node i context wit), context))
   | View vnode -> begin
       match vnode with
       | Internal (left, right, indexing_rule, hashed_is_transitive, indexed_implies_hashed) ->
@@ -398,7 +405,7 @@ let rec go_side side (Cursor (trail, node, context)) =
 let rec go_down_extender (Cursor (trail, node, context)) =
   (* Move the cursor down the extender it points to. *)
   match node with
-  | Disk (i, wit) -> go_below_bud (Cursor (trail, View (load_node i context wit), context))
+  | Disk (i, wit) -> go_down_extender (Cursor (trail, View (load_node i context wit), context))
   | View vnode -> begin
       match vnode with
       | Extender (segment, below, indexing_rule, hashed_is_transitive, indexed_implies_hashed) ->
@@ -408,7 +415,7 @@ let rec go_down_extender (Cursor (trail, node, context)) =
       | _ -> Error "Attempted to go down an extender but did not find an extender"
     end
 
-let rec go_up (Cursor (trail, node, context))  =
+let go_up (Cursor (trail, node, context))  =
   match trail with
   | Top -> Error "cannot go above top"
   | Left (prev_trail, right,
@@ -539,20 +546,6 @@ type value = Value.t
 type segment = Path.segment
 type hash = Bigstring.t
 
-let commit _ = failwith "not implemented"
-let snapshot _ _ _ = failwith "not implemented"
-let update _ _ _ = failwith "not implemented"
-let get _ _ = failwith "not implemented"
-let delete _ _ = failwith "not implemented"
-let create_subtree _ _ = failwith "not implemented"
-let parent _ = failwith "not implemented"
-let subtree _ _ = failwith "not implemented"
-let gc ~src:_ _ ~dest:_ = failwith "not implemented"
-let hash _ = failwith "not implemented"
-let open_context ~filename:_ = failwith "not implemented"
-let root _ _ = failwith "not implemented"
-
-
 module Utils : sig
   val extend : Path.segment -> (not_indexed, not_hashed, not_extender) node -> ex_node
 
@@ -570,7 +563,7 @@ end
    a function returning a zipper and then separate
    functions to do the edit *)
 
-let rec tag_extender (type i h e) (node:(i,h, e) node) : (e extender_witness) =
+let tag_extender (type i h e) (node:(i,h, e) node) : (e extender_witness) =
   match node with
     | Disk (_, wit) -> wit
     | View (Extender _) -> Maybe_Extender
@@ -585,7 +578,7 @@ let alter cursor segment alteration =
 
     let Cursor (_, _, context) = cursor in
 
-    let rec alter_aux : type e . ex_node ->
+    let rec alter_aux :  ex_node ->
       Path.segment ->
       Path.side ->
       ((not_indexed, not_hashed) ex_extender_node , error) result =
@@ -745,7 +738,7 @@ let delete cursor segment =
      Situations where this might be tricky: if one lef of an internal node disappears, then
      it is replaced by the other child. We may thus need to merge extenders but that's OK
   *)
-  let Cursor (trail, node, context) = cursor in
+  let Cursor (_, _, context) = cursor in
   let rec delete_aux (Node node) segment : ((not_indexed, not_hashed) ex_extender_node option, string) result =
     match (node) with
     | Disk (i, wit) -> delete_aux (Node (View (load_node i context wit))) segment
@@ -759,7 +752,7 @@ let delete cursor segment =
         | Bud _ ->  Error "reached a bud and not a leaf"
         | Extender (other_segment, node, _, _, _) ->
           (* If I don't go fully down that segment, that's an error *)
-          let _, rest, rest_other = Path.common_prefix other_segment segment in
+          let _, rest, rest_other = Path.common_prefix segment other_segment in
           if rest_other = Path.empty then begin
             match (delete_aux (Node node) rest) with
             | Error e -> Error e
@@ -767,9 +760,11 @@ let delete cursor segment =
             | Ok (Some (Not_Extender node)) -> Ok (Some (Is_Extender (View (
                 Extender(other_segment, node, Not_Indexed, Not_Hashed, Not_Indexed_Any)))))
             | Ok (Some (Is_Extender (View (Extender (next_segment, node, _, _, _))))) ->
-              ignore (next_segment,  node) ;failwith "not implemented"
+              Ok (Some (Is_Extender (View (
+                  Extender( Path.(other_segment @ next_segment), node, Not_Indexed, Not_Hashed,
+                            Not_Indexed_Any)))))
           end else
-            Error "no leaf at this location"
+            Error (Printf.sprintf "no leaf at this location %s" (Path.to_string rest_other))
 
         | Internal (left, right, _, _, _) -> begin
             match Path.cut segment with
@@ -811,7 +806,7 @@ let delete cursor segment =
                 | Ok None -> begin
                     let extend ?(segafter=Path.empty) left =
                       Ok (Some (Is_Extender (View (
-                          Extender (Path.((of_side_list [Right]) @ segafter),
+                          Extender (Path.((of_side_list [Left]) @ segafter),
                                     left, Not_Indexed, Not_Hashed, Not_Indexed_Any)))))
                     in match left with
                     | Disk (index, wit) -> begin
@@ -832,9 +827,31 @@ let delete cursor segment =
               end
           end
       end
-  in ignore ((segment,delete_aux)) ; failwith "not finished"
+  in
+  match cursor with
+  | Cursor (_, View (Bud (None, _, _, _)), _) ->
+    (* If we're deleting from a bud that has nothing below... *)
+    Error "nothing to delete"
+  | Cursor (trail, View (Bud (Some deletion_point, _, _, _)), context) ->
+    let result = delete_aux (Node deletion_point) segment in begin
+      match result with
+      | Error e -> Error e
+      | Ok None -> Ok (attach trail (
+          View (Bud (None, Not_Indexed, Not_Hashed, Not_Indexed_Any))) context)
+      | Ok (Some (Is_Extender result)) ->
+        Ok (attach trail (
+            View (Bud (Some result, Not_Indexed, Not_Hashed, Not_Indexed_Any))) context)
+      | Ok (Some (Not_Extender result)) ->
+        Ok (attach trail (
+            View (Bud (Some result, Not_Indexed, Not_Hashed, Not_Indexed_Any))) context)
+    end
+  | _ -> Error "Must insert from a bud"
 
+(* How to merge alter and delete *)
+type modifier = value option -> (value option, error) result
 
+(* Replace a part of the tree with another *)
+type mogrify = ex_node option -> (ex_node option, error) result
 
 
 let upsert cursor segment value =
@@ -883,7 +900,84 @@ let (|>>=) x f = match x with
 let cursor = empty context
 
 let foo =
-  upsert cursor (Path.of_side_list [Path.Left; Path.Right]) (Value.of_string "foo") |>>=
-  fun cursor -> (upsert cursor (Path.of_side_list [Path.Left; Path.Left]) (Value.of_string "foo"))
+  upsert cursor (Path.of_side_list [Path.Left; Path.Right]) (Value.of_string "fooLR") |>>=
+  fun cursor -> (upsert cursor (Path.of_side_list [Path.Left; Path.Left]) (Value.of_string "fooLL"))
   |>>= go_below_bud |>>= go_down_extender |>>= (go_side Path.Left) |>>= go_up
   |>>= (go_side Path.Right) |>>= go_up |>>= go_up |>>= go_up
+
+
+type ex_hashed_node =
+  | Hashed_and_Indexed :    (indexed, hashed, 'e) node * hash  -> ex_hashed_node
+  | Hashed_but_not_Indexed : (not_indexed, hashed, 'e) node * hash -> ex_hashed_node
+
+let hash Cursor (trail, node, context) =
+  let rec hash_aux (Node node) =  match node with
+    (* If it's already hashed nothing to do *)
+    | Disk (index, wit) -> hash_aux (Node (View (load_node index context wit)))
+    | View vnode -> begin
+        match vnode with
+        (* easy case where it's already hashed *)
+        | Leaf (_, Not_Indexed, Hashed h, _) -> Hashed_but_not_Indexed (node, h)
+        | Leaf (_, Indexed _, Hashed h, _) -> Hashed_and_Indexed (node, h)
+
+        | Bud (_, Not_Indexed, Hashed h, _) -> Hashed_but_not_Indexed (node, h)
+        | Bud (_, Indexed _, Hashed h, _) -> Hashed_and_Indexed (node, h)
+
+        | Internal (_, _, Left_Not_Indexed, Hashed h, _)  -> Hashed_but_not_Indexed (node, h)
+        | Internal (_, _, Right_Not_Indexed, Hashed h, _)  -> Hashed_but_not_Indexed (node, h)
+        | Internal (_, _, Indexed _, Hashed h, _)  -> Hashed_and_Indexed (node, h)
+
+        | Extender (_, _, Not_Indexed, Hashed h, _) -> Hashed_but_not_Indexed (node, h)
+        | Extender (_, _, Indexed _, Hashed h, _) -> Hashed_and_Indexed (node, h)
+
+
+        (* hashing is necessary below *)
+        | Leaf (value, _, _, _) ->
+          let h = Value.(value |> hash |> big_string_of_hash) in
+           Hashed_but_not_Indexed ((View (Leaf (value, Not_Indexed, Hashed h, Not_Indexed_Any))), h)
+        | Bud (Some underneath, _, _, _) ->
+          (match hash_aux (Node underneath) with
+           | Hashed_and_Indexed (underneath, h) ->
+          (* a bud has the same hash as the node immediately below, its a bit
+             of a pseudo node *)
+             Hashed_but_not_Indexed (View (Bud (
+                 Some underneath, Not_Indexed, Hashed h, Not_Indexed_Any)), h)
+           | Hashed_but_not_Indexed (underneath, h) ->
+             Hashed_but_not_Indexed (View (Bud (
+                 Some underneath, Not_Indexed, Hashed h, Not_Indexed_Any)), h)
+          )
+
+        | Internal (left, right, Left_Not_Indexed, _, _) ->
+          let hl = hash_aux (Node left) and hr = hash_aux (Node right) in (
+            match (hl, hr) with
+            | (Hashed_and_Indexed _, _) -> .
+            | (Hashed_but_not_Indexed (l, lh), Hashed_and_Indexed (r, rh)) ->
+              let h = Bigstring.concat "||" [lh; rh] in
+              Hashed_but_not_Indexed (View (
+                  Internal (l, r, Left_Not_Indexed, Hashed h, Not_Indexed_Any)), h)
+            | (Hashed_but_not_Indexed (l, lh), Hashed_but_not_Indexed (r, rh)) ->
+              let h = Bigstring.concat "||" [lh; rh] in
+              Hashed_but_not_Indexed (View (
+                  Internal (l, r, Left_Not_Indexed, Hashed h, Not_Indexed_Any)), h)
+          )
+
+
+      end
+    | _ -> failwith "not implement"
+end
+
+
+
+
+let commit _ = failwith "not implemented"
+let snapshot _ _ _ = failwith "not implemented"
+let update _ _ _ = failwith "not implemented"
+let get _ _ = failwith "not implemented"
+let delete _ _ = failwith "not implemented"
+let create_subtree _ _ = failwith "not implemented"
+let parent _ = failwith "not implemented"
+let subtree _ _ = failwith "not implemented"
+let gc ~src:_ _ ~dest:_ = failwith "not implemented"
+
+let open_context ~filename:_ = failwith "not implemented"
+let root _ _ = failwith "not implemented"
