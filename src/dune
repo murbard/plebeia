@@ -1,3 +1,5 @@
 (library
- (public_name plebeia)
- (libraries bigstring res nocrypto))
+  (name plebeia)
+  (public_name plebeia)
+  (libraries bigstring res nocrypto digestif digestif.ocaml)
+  (flags :standard -warn-error -32-34-37))

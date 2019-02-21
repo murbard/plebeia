@@ -1,3 +1,5 @@
+module type S = sig
+
 (** Module manipulating patricia trees and persisting them to disk *)
 
 
@@ -45,7 +47,7 @@ val subtree : cursor -> segment -> (cursor, error) result
 val create_subtree: cursor -> segment -> (cursor, error) result
 (** Create a subtree (bud). Think "mkdir segment" *)
 
-val parent : cursor -> cursor
+val parent : cursor -> (cursor, error) result
 (** Moves the cursor back to the parent tree. Think "cd .." *)
 
 val get : cursor -> segment -> (value, error) result
@@ -73,3 +75,5 @@ val commit: cursor -> hash
 
 val hash: cursor -> hash
 (** Computes the hash of the cursor without committing. *)
+
+end

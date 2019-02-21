@@ -1,0 +1,18 @@
+(executables
+ (names segment_hash test_api)
+ (libraries plebeia))
+
+(alias
+ (name test_api)
+ (deps test_api.exe)
+ (action (run ./test_api.exe)))
+  
+(alias
+ (name test_segment_hash)
+ (deps segment_hash.exe)
+ (action (run ./segment_hash.exe)))
+  
+(alias
+ (name runtest)
+ (deps (alias test_segment_hash)
+       (alias test_api)))

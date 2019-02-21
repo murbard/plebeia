@@ -52,7 +52,7 @@ This leads to a bit of awkwardness (223 bit hashes, array size limited to 2^32 -
 but the potential benefit is that two nodes can fit in a cache line in 64 bit architectures.
 If it turns out this doesn't make a noticeable difference, it's straightforward to increase
 the size of cells to 320 bits, or introduce variable size cells, and remove much of the
-akwardness.
+awkwardness.
 
 - Internal node:
 
